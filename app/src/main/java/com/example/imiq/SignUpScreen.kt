@@ -91,7 +91,7 @@ fun SignUpScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Error message
+            // Error message in case
             if (loginState is LoginState.Error) {
                 Text(
                     text = (loginState as LoginState.Error).message,
