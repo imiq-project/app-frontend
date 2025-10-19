@@ -49,11 +49,13 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun ImiqApp() {
     var currentScreen by remember { mutableStateOf("signup") }
+    var userProfile by remember { mutableStateOf<ClassificationResult?>(null) }
 
     // Handle Android back button
     BackHandler(enabled = currentScreen != "signup") {
         currentScreen = when (currentScreen) {
-            "routing" -> "profile"
+            "main_menu" -> "profile"
+            "routing" -> "main_menu"
             "profile" -> "signup"
             else -> currentScreen
         }
@@ -62,7 +64,8 @@ fun ImiqApp() {
     // Navigate back function
     fun navigateBack() {
         currentScreen = when (currentScreen) {
-            "routing" -> "profile"
+            "main_menu" -> "profile"
+            "routing" -> "main_menu"
             "profile" -> "signup"
             else -> currentScreen
         }
@@ -74,17 +77,33 @@ fun ImiqApp() {
                 currentScreen = "profile"
             }
         )
+
         "profile" -> ProfileSetupScreen(
-            onProfileComplete = {
+            onProfileComplete = { result ->
+                // Store the classification result
+                userProfile = result
+                currentScreen = "main_menu"
+            },
+            onBackClick = { navigateBack() }
+        )
+
+        "main_menu" -> MainMenuScreen(
+            userProfile = userProfile,
+            onNavigateToRouting = {
                 currentScreen = "routing"
             },
             onBackClick = { navigateBack() }
         )
+
         "routing" -> RoutingScreen(
+            userProfile = userProfile,
             onBackClick = { navigateBack() }
         )
-        else -> RoutingScreen(
-            onBackClick = { navigateBack() }
+
+        else -> SignUpScreen(
+            onSignUpComplete = {
+                currentScreen = "profile"
+            }
         )
     }
 }

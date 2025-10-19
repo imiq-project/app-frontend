@@ -27,7 +27,10 @@ import androidx.compose.material.icons.filled.CheckCircle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RoutingScreen(onBackClick: () -> Unit = {}) {
+fun RoutingScreen(
+    userProfile: ClassificationResult? = null,  // Add this parameter
+    onBackClick: () -> Unit = {}
+) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val locationHelper = remember { LocationHelper(context) }
     val scope = rememberCoroutineScope()
@@ -68,10 +71,25 @@ fun RoutingScreen(onBackClick: () -> Unit = {}) {
                 val startCoords = currentLatLng ?: Pair(52.45342, 11.45235)
                 val destCoords = Pair(52.55342, 11.55235)
 
+                // TODO: Use userProfile data to personalize route recommendations
+                // For example, convert ProfileType to profile map for API
+                val profileMap = userProfile?.let {
+                    mapOf(
+                        "profile_type" to it.profileType.value,
+                        "preferences" to when(it.profileType) {
+                            ProfileType.ECO_WARRIOR -> "eco_friendly"
+                            ProfileType.COMFORT_SEEKER -> "comfort"
+                            ProfileType.TIME_OPTIMIZER -> "fastest"
+                            ProfileType.BUDGET_CONSCIOUS -> "cheapest"
+                            ProfileType.FLEXIBLE_PRAGMATIST -> "balanced"
+                        }
+                    )
+                } ?: emptyMap()
+
                 val request = RouteRequest(
                     start = listOf(startCoords.first, startCoords.second),
                     destination = listOf(destCoords.first, destCoords.second),
-                    profile = emptyMap()
+                    profile = profileMap
                 )
 
                 val response = RoutingApiService.api.getRoute(request)
@@ -97,12 +115,24 @@ fun RoutingScreen(onBackClick: () -> Unit = {}) {
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        "Route Planning",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "Route Planning",
+                            color = Color.White,
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Medium
+                        )
+                        // Show profile icon in top bar
+                        userProfile?.let {
+                            Text(
+                                text = it.profile.icon,
+                                fontSize = 20.sp
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
@@ -160,6 +190,45 @@ fun RoutingScreen(onBackClick: () -> Unit = {}) {
                     )
                     .padding(16.dp)
             ) {
+                // Show profile info banner (optional)
+                userProfile?.let { profile ->
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = Color.White.copy(alpha = 0.15f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = profile.profile.icon,
+                                fontSize = 24.sp
+                            )
+                            Column {
+                                Text(
+                                    text = "Optimized for ${profile.profile.name}",
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = profile.profile.description,
+                                    color = Color.White.copy(alpha = 0.8f),
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
                 // From field
                 CompactLocationField(
                     label = "From",

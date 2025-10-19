@@ -23,75 +23,31 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.ui.draw.alpha
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-
-data class ProfileQuestion(
-    val id: Int,
-    val emoji: String,
-    val friendlyIntro: String,
-    val question: String,
-    val options: List<String>
-)
 
 enum class OnboardingStep {
     WELCOME,
     WHY_ASKING,
     QUESTIONS,
-    CREATING_PROFILE
+    CREATING_PROFILE,
+    PROFILE_RESULT
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileSetupScreen(
-    onProfileComplete: () -> Unit = {},
+    onProfileComplete: (ClassificationResult) -> Unit = {},  // Changed: now passes result
     onBackClick: () -> Unit = {}
 ) {
     var currentStep by remember { mutableStateOf(OnboardingStep.WELCOME) }
     var currentQuestionIndex by remember { mutableStateOf(0) }
-    var selectedAnswers by remember { mutableStateOf(mapOf<Int, String>()) }
+    var selectedAnswers by remember { mutableStateOf(mapOf<String, Int>()) }
     var isTransitioning by remember { mutableStateOf(false) }
+    var classificationResult by remember { mutableStateOf<ClassificationResult?>(null) }
 
-    val questions = listOf(
-        ProfileQuestion(
-            id = 0,
-            emoji = "🎂",
-            friendlyIntro = "First things first...",
-            question = "How old are you?",
-            options = listOf("18-20", "21-25", "26-30", "31-35", "36+")
-        ),
-        ProfileQuestion(
-            id = 1,
-            emoji = "⭐",
-            friendlyIntro = "Now, let's talk priorities...",
-            question = "What matters most to you?",
-            options = listOf(
-                "🔓 Freedom",
-                "🛡️ Safety",
-                "💰 Costs",
-                "🌍 Environment",
-                "😌 Less Stress",
-                "✨ Identity"
-            )
-        ),
-        ProfileQuestion(
-            id = 2,
-            emoji = "🚀",
-            friendlyIntro = "Getting around the city...",
-            question = "How do you usually travel?",
-            options = listOf("🚶 Walking", "🚌 Bus", "🚗 Car", "🚴 Bike", "🛴 Scooter", "🚊 Train")
-        ),
-        ProfileQuestion(
-            id = 3,
-            emoji = "🎭",
-            friendlyIntro = "Last one, we promise!",
-            question = "What's your personality?",
-            options = listOf("🤫 Introvert", "🎉 Extrovert")
-        )
-    )
+    val classifier = remember { MobilityClassifier() }
+    val questions = remember { classifier.getQuestions() }
 
     when (currentStep) {
         OnboardingStep.WELCOME -> WelcomeScreen(
@@ -108,11 +64,15 @@ fun ProfileSetupScreen(
             selectedAnswers = selectedAnswers,
             isTransitioning = isTransitioning,
             onQuestionIndexChange = { currentQuestionIndex = it },
-            onAnswerSelected = { questionId, answer ->
-                selectedAnswers = selectedAnswers + (questionId to answer)
+            onAnswerSelected = { questionId, answerIndex ->
+                selectedAnswers = selectedAnswers + (questionId to answerIndex)
             },
             onTransitioningChange = { isTransitioning = it },
-            onQuestionsComplete = { currentStep = OnboardingStep.CREATING_PROFILE },
+            onQuestionsComplete = {
+                // Classify the user
+                classificationResult = classifier.classify(selectedAnswers)
+                currentStep = OnboardingStep.CREATING_PROFILE
+            },
             onBackClick = {
                 if (currentQuestionIndex > 0) {
                     currentQuestionIndex--
@@ -122,8 +82,18 @@ fun ProfileSetupScreen(
             }
         )
         OnboardingStep.CREATING_PROFILE -> CreatingProfileScreen(
-            onComplete = onProfileComplete
+            onComplete = {
+                currentStep = OnboardingStep.PROFILE_RESULT
+            }
         )
+        OnboardingStep.PROFILE_RESULT -> classificationResult?.let { result ->
+            ProfileResultScreen(
+                result = result,
+                onContinue = {
+                    onProfileComplete(result)  // Pass the result when continuing
+                }
+            )
+        }
     }
 }
 
@@ -316,8 +286,8 @@ fun WhyAskingScreen(
 
                     FeaturePoint(
                         emoji = "🤔",
-                        title = "Ask a few questions",
-                        description = "Just 4 quick ones about you",
+                        title = "Ask 10 quick questions",
+                        description = "About your travel preferences and priorities",
                         delay = 100L
                     )
 
@@ -325,8 +295,8 @@ fun WhyAskingScreen(
 
                     FeaturePoint(
                         emoji = "🧠",
-                        title = "Understand your style",
-                        description = "Match you with similar travelers",
+                        title = "Analyze your mobility style",
+                        description = "Match you to one of 5 unique profiles",
                         delay = 200L
                     )
 
@@ -334,8 +304,8 @@ fun WhyAskingScreen(
 
                     FeaturePoint(
                         emoji = "✨",
-                        title = "Suggest smart routes",
-                        description = "Perfect transport options for you",
+                        title = "Personalized recommendations",
+                        description = "Get transport options tailored to you",
                         delay = 300L
                     )
                 }
@@ -430,10 +400,10 @@ fun FeaturePoint(
 fun QuestionsScreen(
     questions: List<ProfileQuestion>,
     currentQuestionIndex: Int,
-    selectedAnswers: Map<Int, String>,
+    selectedAnswers: Map<String, Int>,
     isTransitioning: Boolean,
     onQuestionIndexChange: (Int) -> Unit,
-    onAnswerSelected: (Int, String) -> Unit,
+    onAnswerSelected: (String, Int) -> Unit,
     onTransitioningChange: (Boolean) -> Unit,
     onQuestionsComplete: () -> Unit,
     onBackClick: () -> Unit
@@ -523,9 +493,9 @@ fun QuestionsScreen(
 
                     QuestionCard(
                         question = question,
-                        selectedAnswer = selectedAnswers[question.id],
-                        onAnswerSelected = { answer ->
-                            onAnswerSelected(question.id, answer)
+                        selectedAnswerIndex = selectedAnswers[question.id],
+                        onAnswerSelected = { answerIndex ->
+                            onAnswerSelected(question.id, answerIndex)
                             onTransitioningChange(true)
                             coroutineScope.launch {
                                 delay(500)
@@ -548,16 +518,33 @@ fun QuestionsScreen(
 @Composable
 fun QuestionCard(
     question: ProfileQuestion,
-    selectedAnswer: String?,
-    onAnswerSelected: (String) -> Unit,
+    selectedAnswerIndex: Int?,
+    onAnswerSelected: (Int) -> Unit,
     isTransitioning: Boolean
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState()),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
+        // Emoji based on question type
+        val emoji = when (question.id) {
+            "environment" -> "🌱"
+            "cost" -> "💰"
+            "time_priority" -> "⚡"
+            "comfort" -> "💺"
+            "car_ownership" -> "🚗"
+            "crowding" -> "👥"
+            "physical_activity" -> "🚴"
+            "weather" -> "🌦️"
+            "flexibility" -> "🔄"
+            "values" -> "⭐"
+            else -> "❓"
+        }
+
         val scale by animateFloatAsState(
-            targetValue = if (selectedAnswer != null) 1.15f else 1f,
+            targetValue = if (selectedAnswerIndex != null) 1.15f else 1f,
             animationSpec = spring(
                 dampingRatio = Spring.DampingRatioMediumBouncy,
                 stiffness = Spring.StiffnessMedium
@@ -566,30 +553,21 @@ fun QuestionCard(
         )
 
         Text(
-            text = question.emoji,
+            text = emoji,
             fontSize = 80.sp,
             modifier = Modifier.scale(scale)
         )
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        Text(
-            text = question.friendlyIntro,
-            fontSize = 16.sp,
-            color = Color.White.copy(alpha = 0.85f),
-            textAlign = TextAlign.Center,
-            fontWeight = FontWeight.Medium
-        )
-
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(32.dp))
 
         Text(
             text = question.question,
-            fontSize = 26.sp,
+            fontSize = 24.sp,
             fontWeight = FontWeight.Bold,
             color = Color.White,
             textAlign = TextAlign.Center,
-            lineHeight = 32.sp
+            lineHeight = 32.sp,
+            modifier = Modifier.padding(horizontal = 8.dp)
         )
 
         Spacer(modifier = Modifier.height(40.dp))
@@ -597,8 +575,8 @@ fun QuestionCard(
         question.options.forEachIndexed { index, option ->
             AnimatedOptionButton(
                 text = option,
-                isSelected = selectedAnswer == option,
-                onClick = { if (!isTransitioning) onAnswerSelected(option) },
+                isSelected = selectedAnswerIndex == index,
+                onClick = { if (!isTransitioning) onAnswerSelected(index) },
                 delay = index * 50L
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -664,9 +642,10 @@ fun AnimatedOptionButton(
             ) {
                 Text(
                     text = text,
-                    fontSize = 17.sp,
+                    fontSize = 16.sp,
                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isSelected) Color(0xFF7C4DFF) else Color.Black.copy(alpha = 0.8f)
+                    color = if (isSelected) Color(0xFF7C4DFF) else Color.Black.copy(alpha = 0.8f),
+                    modifier = Modifier.weight(1f)
                 )
 
                 if (isSelected) {
@@ -702,9 +681,9 @@ fun CreatingProfileScreen(
 
     val steps = listOf(
         "Analyzing your preferences" to "🧠",
-        "Finding your tribe" to "👥",
-        "Personalizing routes" to "🗺️",
-        "Almost ready" to "✨"
+        "Calculating profile scores" to "📊",
+        "Matching your style" to "🎯",
+        "Preparing recommendations" to "✨"
     )
 
     LaunchedEffect(Unit) {
@@ -856,6 +835,237 @@ fun CreatingProfileScreen(
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ProfileResultScreen(
+    result: ClassificationResult,
+    onContinue: () -> Unit
+) {
+    val darkPurple = Color(0xFF7C4DFF)
+    val mediumPurple = Color(0xFF9575CD)
+    val lightPurple = Color(0xFFE1BEE7)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                brush = Brush.verticalGradient(
+                    colors = listOf(darkPurple, mediumPurple, lightPurple)
+                )
+            )
+    ) {
+        Scaffold(
+            containerColor = Color.Transparent
+        ) { paddingValues ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues)
+                    .verticalScroll(rememberScrollState())
+                    .padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(modifier = Modifier.height(20.dp))
+
+                // Profile Icon with animation
+                var iconScale by remember { mutableStateOf(0f) }
+                LaunchedEffect(Unit) {
+                    delay(200)
+                    iconScale = 1f
+                }
+
+                val scale by animateFloatAsState(
+                    targetValue = iconScale,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessLow
+                    ),
+                    label = "icon_scale"
+                )
+
+                Text(
+                    text = result.profile.icon,
+                    fontSize = 120.sp,
+                    modifier = Modifier.scale(scale)
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Profile Name
+                Text(
+                    text = "You're a",
+                    fontSize = 20.sp,
+                    color = Color.White.copy(alpha = 0.9f),
+                    fontWeight = FontWeight.Medium
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = result.profile.name,
+                    fontSize = 32.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                    textAlign = TextAlign.Center
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Confidence badge
+                Card(
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White.copy(alpha = 0.2f)
+                    )
+                ) {
+                    Text(
+                        text = "${result.confidence.toInt()}% match",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // Description Card
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White.copy(alpha = 0.95f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Text(
+                            text = result.profile.detailedDescription,
+                            fontSize = 16.sp,
+                            color = Color.Black.copy(alpha = 0.8f),
+                            lineHeight = 24.sp
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Characteristics
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White.copy(alpha = 0.95f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Text(
+                            text = "✨ Your Characteristics",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = darkPurple
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        result.profile.characteristics.forEach { characteristic ->
+                            Row(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    text = "•",
+                                    fontSize = 16.sp,
+                                    color = darkPurple,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Text(
+                                    text = characteristic,
+                                    fontSize = 15.sp,
+                                    color = Color.Black.copy(alpha = 0.8f),
+                                    lineHeight = 22.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                // Recommendations
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(20.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color.White.copy(alpha = 0.95f)
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(24.dp)
+                    ) {
+                        Text(
+                            text = "🎯 Recommended Transport",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = darkPurple
+                        )
+
+                        Spacer(modifier = Modifier.height(16.dp))
+
+                        result.profile.recommendations.forEach { recommendation ->
+                            Row(
+                                modifier = Modifier.padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.Top
+                            ) {
+                                Text(
+                                    text = "•",
+                                    fontSize = 16.sp,
+                                    color = darkPurple,
+                                    modifier = Modifier.padding(end = 8.dp)
+                                )
+                                Text(
+                                    text = recommendation,
+                                    fontSize = 15.sp,
+                                    color = Color.Black.copy(alpha = 0.8f),
+                                    lineHeight = 22.sp
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(32.dp))
+
+                // Continue Button
+                Button(
+                    onClick = onContinue,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color.White
+                    ),
+                    contentPadding = PaddingValues(vertical = 18.dp)
+                ) {
+                    Text(
+                        text = "Let's Go!",
+                        color = darkPurple,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
             }
         }
     }
