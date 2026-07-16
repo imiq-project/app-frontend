@@ -84,4 +84,4 @@ Walk / bike / car: step-by-step directions inside the app.
 
 - MapLibre GL for the map (free Carto "Dark Matter" style, no API key)
 - Retrofit / OkHttp + Gson for the APIs, kotlinx-serialization for the survey
-- English + German — switch instantly in Settings, no restart needed
+- Languages for now: English + German 
