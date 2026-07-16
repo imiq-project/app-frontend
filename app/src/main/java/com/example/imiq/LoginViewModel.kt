@@ -10,7 +10,7 @@ import kotlinx.coroutines.launch
 sealed class LoginState {
     object Idle : LoginState()
     object Loading : LoginState()
-    data class Success(val token: String) : LoginState()
+    object Success : LoginState()
     data class Error(val message: String) : LoginState()
 }
 
@@ -32,7 +32,7 @@ class LoginViewModel(
                     if (token != null) {
                         // Save token locally
                         TokenManager.saveToken(token)
-                        _loginState.value = LoginState.Success(token)
+                        _loginState.value = LoginState.Success
                     } else {
                         _loginState.value = LoginState.Error("Invalid response from server")
                     }

@@ -1,6 +1,9 @@
 package com.example.imiq
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.ClickableText
@@ -8,9 +11,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -21,160 +26,126 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SignUpScreen(
     onSignUpComplete: () -> Unit = {},
     viewModel: LoginViewModel = viewModel()
 ) {
+    val s = LocalStrings.current
     var code by remember { mutableStateOf("") }
     val loginState by viewModel.loginState.collectAsState()
     val uriHandler = LocalUriHandler.current
+    val loading = loginState is LoginState.Loading
 
-    // Our purple colors
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
-
-    // Main container
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(darkPurple, mediumPurple, lightPurple)
-                )
-            )
-    ) {
+    MobBackground {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(32.dp),
+                .padding(horizontal = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Spacer(modifier = Modifier.height(100.dp))
+            Spacer(Modifier.weight(0.8f))
 
-            // Logo
+            Image(
+                painter = painterResource(id = R.drawable.imiq_logo),
+                contentDescription = "IMIQ",
+                modifier = Modifier.size(108.dp).clip(RoundedCornerShape(24.dp)),
+                contentScale = ContentScale.Fit
+            )
+            Spacer(Modifier.height(22.dp))
+            Text("IMIQ Mobility", color = Mob.textPrimary, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
             Text(
-                text = "IMIQ",
-                fontSize = 48.sp,
-                fontWeight = FontWeight.Bold,
-                color = Color.White
+                s.signupTagline,
+                color = Mob.textSecondary, fontSize = 14.sp
             )
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(Modifier.height(40.dp))
 
-            Text(
-                text = "Sign up",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Normal,
-                color = Color.White
-            )
-
-            Spacer(modifier = Modifier.height(40.dp))
-
-            // Code field (changed from email/password)
-            TextField(
+            OutlinedTextField(
                 value = code,
                 onValueChange = { code = it },
-                label = { Text("Enter Code") },
-                placeholder = { Text("123-456-789") },
+                label = { Text(s.accessCode) },
+                placeholder = { Text("123-456-789", color = Mob.textMuted) },
+                singleLine = true,
+                enabled = !loading,
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.White.copy(alpha = 0.3f),
-                    unfocusedContainerColor = Color.White.copy(alpha = 0.3f),
-                    focusedIndicatorColor = Color.Transparent,
-                    unfocusedIndicatorColor = Color.Transparent
-                ),
-                enabled = loginState !is LoginState.Loading
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Mob.primary,
+                    unfocusedBorderColor = Mob.border,
+                    focusedContainerColor = Mob.surfaceHi,
+                    unfocusedContainerColor = Mob.surface,
+                    focusedTextColor = Mob.textPrimary,
+                    unfocusedTextColor = Mob.textPrimary,
+                    focusedLabelColor = Mob.primary,
+                    unfocusedLabelColor = Mob.textMuted,
+                    cursorColor = Mob.primary
+                )
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
-
-            // Error message in case
             if (loginState is LoginState.Error) {
+                Spacer(Modifier.height(10.dp))
                 Text(
-                    text = (loginState as LoginState.Error).message,
-                    color = Color.Red.copy(alpha = 0.9f),
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(8.dp)
+                    (loginState as LoginState.Error).message,
+                    color = Mob.danger, fontSize = 13.sp
                 )
             }
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(Modifier.height(20.dp))
 
-            // Get started button
-            Button(
-                onClick = {
-                    viewModel.login(code)
-                },
-                enabled = code.isNotBlank() && loginState !is LoginState.Loading,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color.White.copy(alpha = 0.3f),
-                    disabledContainerColor = Color.White.copy(alpha = 0.1f)
-                ),
-                shape = RoundedCornerShape(12.dp),
+            // Primary action with loading state
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(50.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(if (code.isNotBlank() && !loading) Mob.primary else Mob.surfaceHi)
+                    .clickable(enabled = code.isNotBlank() && !loading) { viewModel.login(code) }
+                    .padding(vertical = 17.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (loginState is LoginState.Loading) {
-                    CircularProgressIndicator(
-                        color = Color.White,
-                        modifier = Modifier.size(24.dp),
-                        strokeWidth = 2.dp
-                    )
+                if (loading) {
+                    CircularProgressIndicator(color = Mob.primary, modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
                 } else {
-                    Row {
-                        Text("get started", color = Color.White, fontSize = 16.sp)
-                        Text(" →", color = Color.White, fontSize = 16.sp)
-                    }
+                    Text(
+                        s.getStarted,
+                        color = if (code.isNotBlank()) Mob.onPrimary else Mob.textMuted,
+                        fontSize = 16.sp, fontWeight = FontWeight.Bold
+                    )
+                    Text("  →", color = if (code.isNotBlank()) Mob.onPrimary else Mob.textMuted, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 }
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(Modifier.height(20.dp))
 
-            // Registration link
-            val annotatedString = buildAnnotatedString {
-                withStyle(style = SpanStyle(color = Color.White)) {
-                    append("Don't have a code? ")
-                }
-                pushStringAnnotation(tag = "URL", annotation = "https://imiq.ovgu.de/anmeldung")
-                withStyle(
-                    style = SpanStyle(
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        textDecoration = TextDecoration.Underline
-                    )
-                ) {
-                    append("Register here")
+            val annotated = buildAnnotatedString {
+                withStyle(SpanStyle(color = Mob.textSecondary)) { append(s.noCodePrefix) }
+                pushStringAnnotation("URL", "https://imiq.ovgu.de/anmeldung")
+                withStyle(SpanStyle(color = Mob.primary, fontWeight = FontWeight.Bold, textDecoration = TextDecoration.Underline)) {
+                    append(s.registerHere)
                 }
                 pop()
             }
+            ClickableText(text = annotated, onClick = { offset ->
+                annotated.getStringAnnotations("URL", offset, offset).firstOrNull()?.let { uriHandler.openUri(it.item) }
+            })
 
-            ClickableText(
-                text = annotatedString,
-                onClick = { offset ->
-                    annotatedString.getStringAnnotations(tag = "URL", start = offset, end = offset)
-                        .firstOrNull()?.let { annotation ->
-                            uriHandler.openUri(annotation.item)
-                        }
-                }
-            )
+            Spacer(Modifier.weight(1f))
         }
     }
 
-    // Handle successful login
     LaunchedEffect(loginState) {
         if (loginState is LoginState.Success) {
-            onSignUpComplete() // Navigate to profile setup screen
-            viewModel.resetState() // Reset for next time
+            onSignUpComplete()
+            viewModel.resetState()
         }
     }
 }
 
-@Preview(showBackground = true)
+@Preview(showBackground = true, backgroundColor = 0xFF07090D)
 @Composable
-fun SignUpScreenPreview() {
+private fun SignUpPreview() {
     SignUpScreen()
 }

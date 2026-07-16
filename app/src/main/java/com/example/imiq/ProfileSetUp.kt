@@ -1,1072 +1,1381 @@
 package com.example.imiq
 
-import androidx.compose.animation.*
-import androidx.compose.animation.core.*
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ExperimentalAnimationApi
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.graphics.StrokeCap
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.json.*
 
-enum class OnboardingStep {
-    WELCOME,
-    WHY_ASKING,
-    QUESTIONS,
-    CREATING_PROFILE,
-    PROFILE_RESULT
-}
+// =====================================================================
+//  DYCONET Cognitive Passport Questionnaire
+//  Replaces the old chat-style profile setup. Collects survey answers
+//  matching the LimeSurvey schema, POSTs to the Spark backend, and
+//  saves the returned cognitive passport on the device.
+// =====================================================================
+
+private data class NeedSpec(val key: String, val label: String, val help: String)
+private data class ModeSpec(val key: String, val label: String, val emoji: String)
+
+private val NEEDS = listOf(
+    NeedSpec("comfort_physical", "Travel comfort",     "Comfortable seats, cleanliness, pleasant temperature, quiet"),
+    NeedSpec("reliable",         "Reliability",        "Punctuality, predictability, no cancellations"),
+    NeedSpec("flex",             "Flexibility",        "Spontaneous departures, independence from schedules"),
+    NeedSpec("cost",             "Cost",               "Low ticket prices, low maintenance, low fuel costs"),
+    NeedSpec("safety_crime",     "Personal security",  "Protection from harassment or crime, feeling safe at night"),
+    NeedSpec("health_activity",  "Physical activity",  "Active transport, fitness, fresh air"),
+    NeedSpec("time",             "Time saving",        "Fastest route, short travel time, no traffic jams"),
+    NeedSpec("health_infection", "Health protection",  "Low infection risk, hygiene, virus-free"),
+    NeedSpec("crowding",         "Privacy / space",    "No crowding, personal space, distance from others"),
+    NeedSpec("safety_accident",  "Traffic safety",     "Protection from accidents, safe technology, safe driving"),
+    NeedSpec("env",              "Eco-friendliness",   "Low CO2 emissions, climate protection, clean air"),
+)
+
+// v1 (boss decision 2026-06-05): only 4 aggregated modes. These keys are the
+// DYCONET parser's canonical JSON keys, so the SAME key works for frequencies
+// (s1_/s2_), valences (emoval) AND beliefs.
+private val MODES = listOf(
+    ModeSpec("walk", "Walking", "🚶"),
+    ModeSpec("bike", "Bicycle / E-Bike", "🚴"),
+    ModeSpec("pt",   "Public Transport (Bus / Tram)", "🚌"),
+    ModeSpec("car",  "Car (Driver)", "🚗"),
+)
+
+// =====================================================================
+//  Main composable — multi-step orchestrator
+// =====================================================================
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileSetupScreen(
-    onProfileComplete: (ClassificationResult) -> Unit = {},  // Changed: now passes result
-    onBackClick: () -> Unit = {}
+    onProfileComplete: (ClassificationResult) -> Unit,
+    onBackClick: () -> Unit,
 ) {
-    var currentStep by remember { mutableStateOf(OnboardingStep.WELCOME) }
-    var currentQuestionIndex by remember { mutableStateOf(0) }
-    var selectedAnswers by remember { mutableStateOf(mapOf<String, Int>()) }
-    var isTransitioning by remember { mutableStateOf(false) }
-    var classificationResult by remember { mutableStateOf<ClassificationResult?>(null) }
+    val scope = rememberCoroutineScope()
+    val s = LocalStrings.current
 
-    val classifier = remember { MobilityClassifier() }
-    val questions = remember { classifier.getQuestions() }
+    // -- Internal step state --
+    var step by remember { mutableStateOf(0) }
+    val totalSteps = 5
 
-    when (currentStep) {
-        OnboardingStep.WELCOME -> WelcomeScreen(
-            onContinue = { currentStep = OnboardingStep.WHY_ASKING },
-            onBackClick = onBackClick
-        )
-        OnboardingStep.WHY_ASKING -> WhyAskingScreen(
-            onContinue = { currentStep = OnboardingStep.QUESTIONS },
-            onBackClick = { currentStep = OnboardingStep.WELCOME }
-        )
-        OnboardingStep.QUESTIONS -> QuestionsScreen(
-            questions = questions,
-            currentQuestionIndex = currentQuestionIndex,
-            selectedAnswers = selectedAnswers,
-            isTransitioning = isTransitioning,
-            onQuestionIndexChange = { currentQuestionIndex = it },
-            onAnswerSelected = { questionId, answerIndex ->
-                selectedAnswers = selectedAnswers + (questionId to answerIndex)
-            },
-            onTransitioningChange = { isTransitioning = it },
-            onQuestionsComplete = {
-                // Classify the user
-                classificationResult = classifier.classify(selectedAnswers)
-                currentStep = OnboardingStep.CREATING_PROFILE
-            },
-            onBackClick = {
-                if (currentQuestionIndex > 0) {
-                    currentQuestionIndex--
-                } else {
-                    currentStep = OnboardingStep.WHY_ASKING
-                }
-            }
-        )
-        OnboardingStep.CREATING_PROFILE -> CreatingProfileScreen(
-            onComplete = {
-                currentStep = OnboardingStep.PROFILE_RESULT
-            }
-        )
-        OnboardingStep.PROFILE_RESULT -> classificationResult?.let { result ->
-            ProfileResultScreen(
-                result = result,
-                onContinue = {
-                    onProfileComplete(result)  // Pass the result when continuing
-                }
-            )
-        }
+    // -- Answer state --
+    val needsAnswers = remember {
+        mutableStateMapOf<String, Float>().apply { NEEDS.forEach { put(it.key, 4f) } }
     }
-}
+    val topPriorities = remember { mutableStateListOf<String>() }  // ordered list of need keys, max 3
+    val frequencies = remember {
+        mutableStateMapOf<String, Float>().apply { MODES.forEach { put(it.key, 1f) } }
+    }
+    val valences = remember {
+        mutableStateMapOf<String, Float>().apply { MODES.forEach { put(it.key, 4f) } }
+    }
+    val valencesNA = remember {
+        mutableStateMapOf<String, Boolean>().apply { MODES.forEach { put(it.key, false) } }
+    }
+    // beliefs[modeKey][needKey] = rating 1..7 (only the user's Top-3 needs are asked).
+    // beliefsNA[modeKey] = "I never use / no opinion" → mode omitted, model imputes it.
+    val beliefs = remember { mutableStateMapOf<String, MutableMap<String, Float>>() }
+    val beliefsNA = remember {
+        mutableStateMapOf<String, Boolean>().apply { MODES.forEach { put(it.key, false) } }
+    }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun WelcomeScreen(
-    onContinue: () -> Unit,
-    onBackClick: () -> Unit
-) {
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
+    // -- Generation state --
+    var generating by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf<String?>(null) }
+    var passportSummary by remember { mutableStateOf<PassportSummary?>(null) }
+    var aiPassportRead by remember { mutableStateOf<String?>(null) }
+    // True once the AI read has FINISHED (success or failure) — gates "Continue".
+    var aiReady by remember { mutableStateOf(false) }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(darkPurple, mediumPurple, lightPurple)
+    fun goBackOrExit() {
+        if (step == 0) onBackClick() else step--
+    }
+
+    fun submit() {
+        generating = true
+        error = null
+        aiReady = false
+        scope.launch {
+            try {
+                val json = buildSurveyJson(
+                    needs = needsAnswers,
+                    top3 = topPriorities,
+                    frequencies = frequencies,
+                    valences = valences,
+                    valencesNA = valencesNA,
+                    beliefs = beliefs,
+                    beliefsNA = beliefsNA,
                 )
-            )
-    ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { },
-                    navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent
-                    )
-                )
-            },
-            containerColor = Color.Transparent
-        ) { paddingValues ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .padding(32.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Spacer(modifier = Modifier.height(40.dp))
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    var emojiScale by remember { mutableStateOf(0.5f) }
-                    LaunchedEffect(Unit) {
-                        delay(200)
-                        emojiScale = 1f
+                val passport = PassportApiService.generatePassport(json)
+                PassportStore.save(passport)
+                passportSummary = summarizePassport(passport)
+                step = 7 // result screen
+                // gpt-5.4 reads the whole passport for the result screen. The result
+                // step blocks "Continue" until this finishes (aiReady). Capped at 20s
+                // so a slow/failed call never traps the user on this screen.
+                scope.launch {
+                    aiPassportRead = withTimeoutOrNull(20_000) {
+                        runCatching { RouteExplainerService.explainPassport(passport) }.getOrNull()
                     }
-
-                    val scale by animateFloatAsState(
-                        targetValue = emojiScale,
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessLow
-                        ),
-                        label = "emoji"
-                    )
-
-                    Text(
-                        text = "👋",
-                        fontSize = 120.sp,
-                        modifier = Modifier.scale(scale)
-                    )
-
-                    Spacer(modifier = Modifier.height(40.dp))
-
-                    Text(
-                        text = "Hi there!",
-                        fontSize = 36.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    Text(
-                        text = "Welcome to your personalized mobility companion",
-                        fontSize = 18.sp,
-                        color = Color.White.copy(alpha = 0.95f),
-                        textAlign = TextAlign.Center,
-                        lineHeight = 26.sp
-                    )
+                    aiReady = true
                 }
-
-                Button(
-                    onClick = onContinue,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(vertical = 18.dp)
-                ) {
-                    Text(
-                        text = "Continue",
-                        color = darkPurple,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+            } catch (e: Exception) {
+                error = e.message ?: "Could not reach the server"
+            } finally {
+                generating = false
             }
         }
     }
-}
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun WhyAskingScreen(
-    onContinue: () -> Unit,
-    onBackClick: () -> Unit
-) {
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(darkPurple, mediumPurple, lightPurple)
-                )
-            )
-    ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { },
-                    navigationIcon = {
-                        IconButton(onClick = onBackClick) {
-                            Icon(
-                                imageVector = Icons.Default.ArrowBack,
-                                contentDescription = "Back",
-                                tint = Color.White
-                            )
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Transparent
-                    )
-                )
-            },
-            containerColor = Color.Transparent
-        ) { paddingValues ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 28.dp, vertical = 20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.Center
-                ) {
-                    Text(
-                        text = "🎯",
-                        fontSize = 90.sp
-                    )
-
-                    Spacer(modifier = Modifier.height(32.dp))
-
-                    Text(
-                        text = "Here's what we'll do",
-                        fontSize = 28.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        textAlign = TextAlign.Center
-                    )
-
-                    Spacer(modifier = Modifier.height(40.dp))
-
-                    FeaturePoint(
-                        emoji = "🤔",
-                        title = "Ask 10 quick questions",
-                        description = "About your travel preferences and priorities",
-                        delay = 100L
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    FeaturePoint(
-                        emoji = "🧠",
-                        title = "Analyze your mobility style",
-                        description = "Match you to one of 5 unique profiles",
-                        delay = 200L
-                    )
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    FeaturePoint(
-                        emoji = "✨",
-                        title = "Personalized recommendations",
-                        description = "Get transport options tailored to you",
-                        delay = 300L
-                    )
+    // Offline fallback: if the DYCONET server is unreachable, complete onboarding
+    // with the bundled sample passport so the user is never hard-blocked. Uses the
+    // user's real slider answers for the local ProfileType derivation; only the
+    // generated cognitive passport is the bundled baseline_1.0 sample.
+    fun useOfflineTemplate() {
+        TokenManager.saveCognitivePassportFromTemplate()
+        val tpl = PassportStore.load()
+        passportSummary = tpl?.let { summarizePassport(it) }
+        aiReady = false
+        if (tpl != null) {
+            scope.launch {
+                aiPassportRead = withTimeoutOrNull(20_000) {
+                    runCatching { RouteExplainerService.explainPassport(tpl) }.getOrNull()
                 }
-
-                Button(
-                    onClick = onContinue,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 20.dp),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(vertical = 18.dp)
-                ) {
-                    Text(
-                        text = "Sounds good!",
-                        color = darkPurple,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
+                aiReady = true
             }
+        } else {
+            aiReady = true
         }
+        error = null
+        step = 7
     }
-}
-
-@Composable
-fun FeaturePoint(
-    emoji: String,
-    title: String,
-    description: String,
-    delay: Long = 0L
-) {
-    var isVisible by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        delay(delay)
-        isVisible = true
-    }
-
-    AnimatedVisibility(
-        visible = isVisible,
-        enter = slideInHorizontally(
-            initialOffsetX = { -it },
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium
-            )
-        ) + fadeIn()
-    ) {
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = Color.White.copy(alpha = 0.95f)
-            ),
-            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(20.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Text(
-                    text = emoji,
-                    fontSize = 32.sp
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = title,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF7C4DFF)
-                    )
-                    Text(
-                        text = description,
-                        fontSize = 13.sp,
-                        color = Color.Black.copy(alpha = 0.7f),
-                        lineHeight = 18.sp
-                    )
-                }
-            }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun QuestionsScreen(
-    questions: List<ProfileQuestion>,
-    currentQuestionIndex: Int,
-    selectedAnswers: Map<String, Int>,
-    isTransitioning: Boolean,
-    onQuestionIndexChange: (Int) -> Unit,
-    onAnswerSelected: (String, Int) -> Unit,
-    onTransitioningChange: (Boolean) -> Unit,
-    onQuestionsComplete: () -> Unit,
-    onBackClick: () -> Unit
-) {
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
-    val coroutineScope = rememberCoroutineScope()
-    val progress = (currentQuestionIndex + 1) / questions.size.toFloat()
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Text(
-                        "Question ${currentQuestionIndex + 1} of ${questions.size}",
-                        color = Color.White,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Medium
-                    )
+                    Column {
+                        Text(stepTitleFor(s, step), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        if (step in 1..5) {
+                            Text(
+                                String.format(s.stepXofY, step, totalSteps),
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(
-                            imageVector = Icons.Default.ArrowBack,
-                            contentDescription = "Back",
-                            tint = Color.White
-                        )
+                    IconButton(onClick = { goBackOrExit() }, enabled = !generating) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back")
+                    }
+                }
+            )
+        },
+        bottomBar = {
+            BottomBar(
+                step = step,
+                canAdvance = canAdvance(step, needsAnswers, topPriorities),
+                generating = generating,
+                aiReady = aiReady,
+                onBack = { goBackOrExit() },
+                onNext = {
+                    // Step 5 (mode feelings) is the last data-collection step.
+                    // Tapping "Generate passport" moves to the loading step
+                    // AND kicks off the network request.
+                    if (step == 5) {
+                        step = 6
+                        submit()
+                    } else {
+                        step++
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = darkPurple
-                )
-            )
-        }
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .background(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(darkPurple, mediumPurple, lightPurple)
-                    )
-                )
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                LinearProgressIndicator(
-                    progress = { progress },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(6.dp),
-                    color = Color.White,
-                    trackColor = Color.White.copy(alpha = 0.3f),
-                    strokeCap = StrokeCap.Round
-                )
-
-                Spacer(modifier = Modifier.height(40.dp))
-
-                AnimatedContent(
-                    targetState = currentQuestionIndex,
-                    transitionSpec = {
-                        (slideInHorizontally(
-                            initialOffsetX = { it },
-                            animationSpec = spring(
-                                dampingRatio = Spring.DampingRatioMediumBouncy,
-                                stiffness = Spring.StiffnessLow
-                            )
-                        ) + fadeIn()).togetherWith(
-                            slideOutHorizontally(
-                                targetOffsetX = { -it },
-                                animationSpec = spring(
-                                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                                    stiffness = Spring.StiffnessLow
-                                )
-                            ) + fadeOut()
-                        )
-                    },
-                    label = "question_animation"
-                ) { questionIndex ->
-                    val question = questions[questionIndex]
-
-                    QuestionCard(
-                        question = question,
-                        selectedAnswerIndex = selectedAnswers[question.id],
-                        onAnswerSelected = { answerIndex ->
-                            onAnswerSelected(question.id, answerIndex)
-                            onTransitioningChange(true)
-                            coroutineScope.launch {
-                                delay(500)
-                                if (questionIndex < questions.size - 1) {
-                                    onQuestionIndexChange(questionIndex + 1)
-                                } else {
-                                    onQuestionsComplete()
-                                }
-                                onTransitioningChange(false)
-                            }
-                        },
-                        isTransitioning = isTransitioning
-                    )
+                onFinish = {
+                    val classification = passportSummary?.let {
+                        derivedClassification(needsAnswers, it)
+                    } ?: fallbackClassification()
+                    // Mark profile as completed so the next app launch skips
+                    // setup and lands on main_menu directly.
+                    val name = TokenManager.getUserName() ?: ""
+                    val age = TokenManager.getUserAge() ?: ""
+                    TokenManager.saveUserProfile(name, age, classification.profileType.value)
+                    onProfileComplete(classification)
                 }
-            }
-        }
-    }
-}
-
-@Composable
-fun QuestionCard(
-    question: ProfileQuestion,
-    selectedAnswerIndex: Int?,
-    onAnswerSelected: (Int) -> Unit,
-    isTransitioning: Boolean
-) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .verticalScroll(rememberScrollState()),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        // Emoji based on question type
-        val emoji = when (question.id) {
-            "environment" -> "🌱"
-            "cost" -> "💰"
-            "time_priority" -> "⚡"
-            "comfort" -> "💺"
-            "car_ownership" -> "🚗"
-            "crowding" -> "👥"
-            "physical_activity" -> "🚴"
-            "weather" -> "🌦️"
-            "flexibility" -> "🔄"
-            "values" -> "⭐"
-            else -> "❓"
-        }
-
-        val scale by animateFloatAsState(
-            targetValue = if (selectedAnswerIndex != null) 1.15f else 1f,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium
-            ),
-            label = "emoji_scale"
-        )
-
-        Text(
-            text = emoji,
-            fontSize = 80.sp,
-            modifier = Modifier.scale(scale)
-        )
-
-        Spacer(modifier = Modifier.height(32.dp))
-
-        Text(
-            text = question.question,
-            fontSize = 24.sp,
-            fontWeight = FontWeight.Bold,
-            color = Color.White,
-            textAlign = TextAlign.Center,
-            lineHeight = 32.sp,
-            modifier = Modifier.padding(horizontal = 8.dp)
-        )
-
-        Spacer(modifier = Modifier.height(40.dp))
-
-        question.options.forEachIndexed { index, option ->
-            AnimatedOptionButton(
-                text = option,
-                isSelected = selectedAnswerIndex == index,
-                onClick = { if (!isTransitioning) onAnswerSelected(index) },
-                delay = index * 50L
             )
-            Spacer(modifier = Modifier.height(12.dp))
         }
-    }
-}
-
-@Composable
-fun AnimatedOptionButton(
-    text: String,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    delay: Long = 0L
-) {
-    var isVisible by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        delay(delay)
-        isVisible = true
-    }
-
-    AnimatedVisibility(
-        visible = isVisible,
-        enter = slideInHorizontally(
-            initialOffsetX = { -it },
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium
-            )
-        ) + fadeIn()
-    ) {
-        val scale by animateFloatAsState(
-            targetValue = if (isSelected) 1.05f else 1f,
-            animationSpec = spring(
-                dampingRatio = Spring.DampingRatioMediumBouncy,
-                stiffness = Spring.StiffnessMedium
-            ),
-            label = "button_scale"
-        )
-
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .scale(scale)
-                .clickable(onClick = onClick),
-            shape = RoundedCornerShape(18.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = if (isSelected)
-                    Color.White
-                else
-                    Color.White.copy(alpha = 0.9f)
-            ),
-            elevation = CardDefaults.cardElevation(
-                defaultElevation = if (isSelected) 8.dp else 2.dp
-            )
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(18.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = text,
-                    fontSize = 16.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isSelected) Color(0xFF7C4DFF) else Color.Black.copy(alpha = 0.8f),
-                    modifier = Modifier.weight(1f)
-                )
-
-                if (isSelected) {
-                    Box(
-                        modifier = Modifier
-                            .size(24.dp)
-                            .background(Color(0xFF4CAF50), CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "✓",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun CreatingProfileScreen(
-    onComplete: () -> Unit
-) {
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
-
-    var currentStep by remember { mutableStateOf(0) }
-    var progress by remember { mutableStateOf(0f) }
-
-    val steps = listOf(
-        "Analyzing your preferences" to "🧠",
-        "Calculating profile scores" to "📊",
-        "Matching your style" to "🎯",
-        "Preparing recommendations" to "✨"
-    )
-
-    LaunchedEffect(Unit) {
-        // Animate through steps
-        for (i in 0..3) {
-            currentStep = i
-            // Animate progress bar
-            val targetProgress = (i + 1) / 4f
-            while (progress < targetProgress) {
-                delay(30)
-                progress += 0.02f
-            }
-            delay(600)
-        }
-        delay(500)
-        onComplete()
-    }
-
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(darkPurple, mediumPurple, lightPurple)
-                )
-            ),
-        contentAlignment = Alignment.Center
-    ) {
+    ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+                .padding(padding)
         ) {
-            // Animated emoji
-            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
-            val scale by infiniteTransition.animateFloat(
-                initialValue = 1f,
-                targetValue = 1.2f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(800, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "scale"
-            )
-
-            AnimatedContent(
-                targetState = currentStep,
-                transitionSpec = {
-                    (fadeIn(animationSpec = tween(300)) + scaleIn(
-                        initialScale = 0.8f,
-                        animationSpec = tween(300)
-                    )).togetherWith(
-                        fadeOut(animationSpec = tween(200)) + scaleOut(
-                            targetScale = 1.2f,
-                            animationSpec = tween(200)
-                        )
-                    )
-                },
-                label = "emoji_animation"
-            ) { step ->
-                Text(
-                    text = steps[step].second,
-                    fontSize = 100.sp,
-                    modifier = Modifier.scale(scale)
+            if (step in 1..5) {
+                LinearProgressIndicator(
+                    progress = step / 5f,
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
+            when (step) {
+                0 -> WelcomeStep()
+                1 -> NeedsStep(needsAnswers)
+                2 -> TopPrioritiesStep(needsAnswers, topPriorities)
+                3 -> BeliefsStep(topPriorities, beliefs, beliefsNA)
+                4 -> FrequenciesStep(frequencies)
+                5 -> EmovalStep(valences, valencesNA)
+                6 -> GeneratingStep(generating = generating, error = error, onRetry = { submit() }, onOffline = { useOfflineTemplate() })
+                7 -> ResultStep(aiPassportRead, aiReady)
+            }
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(48.dp))
+private fun stepTitleFor(s: Strings, step: Int): String = when (step) {
+    0 -> s.stepWelcome
+    1 -> s.stepNeeds
+    2 -> s.stepPriorities
+    3 -> s.stepBeliefs
+    4 -> s.stepFrequencies
+    5 -> s.stepEmoval
+    6 -> s.stepGenerating
+    7 -> s.stepResult
+    else -> ""
+}
 
-            // Progress steps
-            steps.forEachIndexed { index, (stepText, _) ->
-                AnimatedVisibility(
-                    visible = index <= currentStep,
-                    enter = slideInHorizontally(
-                        initialOffsetX = { -it },
-                        animationSpec = spring(
-                            dampingRatio = Spring.DampingRatioMediumBouncy,
-                            stiffness = Spring.StiffnessMedium
-                        )
-                    ) + fadeIn()
+private fun canAdvance(
+    step: Int,
+    needs: Map<String, Float>,
+    top3: List<String>,
+): Boolean = when (step) {
+    2 -> top3.size == 3  // must pick exactly 3
+    else -> true
+}
+
+// =====================================================================
+//  Step 0 — Welcome
+// =====================================================================
+
+@Composable
+private fun WelcomeStep() {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            s.welcomeHeadline,
+            fontSize = 26.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            s.welcomeBody,
+            fontSize = 15.sp,
+            textAlign = TextAlign.Center,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(32.dp))
+        InfoRow("1", s.welcomeInfo1)
+        InfoRow("2", s.welcomeInfo2)
+        InfoRow("3", s.welcomeInfo3)
+        InfoRow("4", s.welcomeInfo4)
+        InfoRow("5", s.welcomeInfo5)
+    }
+}
+
+@Composable
+private fun InfoRow(num: String, text: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(num, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(text, fontSize = 14.sp)
+    }
+}
+
+// =====================================================================
+//  Step 1 — Needs (11 sliders, 1–7)
+// =====================================================================
+
+@Composable
+private fun NeedsStep(answers: MutableMap<String, Float>) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            s.needsIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            s.needsScaleHint,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(4.dp))
+        NEEDS.forEach { need ->
+            NeedSliderCard(
+                label = s.needLabels[need.key] ?: need.label,
+                help = s.needHelps[need.key] ?: need.help,
+                value = answers[need.key] ?: 4f,
+                onChange = { answers[need.key] = it }
+            )
+        }
+        Spacer(Modifier.height(80.dp))  // leave room above bottom bar
+    }
+}
+
+@Composable
+private fun NeedSliderCard(label: String, help: String, value: Float, onChange: (Float) -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(label, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    Text(
+                        help,
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        // Checkmark or loading indicator
-                        Box(
-                            modifier = Modifier
-                                .size(28.dp)
-                                .background(
-                                    if (index < currentStep) Color.White else Color.White.copy(alpha = 0.3f),
-                                    CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            if (index < currentStep) {
-                                Text(
-                                    text = "✓",
-                                    color = darkPurple,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            } else if (index == currentStep) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(18.dp),
-                                    color = darkPurple,
-                                    strokeWidth = 2.dp
-                                )
-                            }
-                        }
-
-                        Text(
-                            text = stepText,
-                            fontSize = 16.sp,
-                            color = if (index <= currentStep) Color.White else Color.White.copy(alpha = 0.5f),
-                            fontWeight = if (index == currentStep) FontWeight.Bold else FontWeight.Normal
-                        )
-                    }
+                    Text(
+                        value.toInt().toString(),
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
                 }
             }
+            Slider(value = value, onValueChange = onChange, valueRange = 1f..7f, steps = 5)
+        }
+    }
+}
 
-            Spacer(modifier = Modifier.height(40.dp))
+// =====================================================================
+//  Step 2 — Top 3 Priorities (rank pyramid)
+// =====================================================================
 
-            // Progress bar
-            Column(
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                LinearProgressIndicator(
-                    progress = { progress },
+@Composable
+private fun TopPrioritiesStep(
+    needsAnswers: Map<String, Float>,
+    top3: MutableList<String>,
+) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            s.prioritiesIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        // --- Pyramid display ---
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            PyramidSlot(rank = 1, needKey = top3.getOrNull(0), onRemove = { top3.removeAt(0) })
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+        ) {
+            PyramidSlot(rank = 2, needKey = top3.getOrNull(1), onRemove = { top3.removeAt(1) })
+            PyramidSlot(rank = 3, needKey = top3.getOrNull(2), onRemove = { top3.removeAt(2) })
+        }
+
+        Spacer(Modifier.height(8.dp))
+        Text(
+            s.prioritiesTapHint,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium
+        )
+
+        // --- Available needs ---
+        NEEDS.forEach { need ->
+            val isPicked = top3.contains(need.key)
+            val rank = top3.indexOf(need.key).takeIf { it >= 0 }?.plus(1)
+            NeedPickRow(
+                label = s.needLabels[need.key] ?: need.label,
+                rating = needsAnswers[need.key]?.toInt() ?: 4,
+                picked = isPicked,
+                rank = rank,
+                enabled = !isPicked && top3.size < 3,
+                onClick = {
+                    if (!isPicked && top3.size < 3) {
+                        top3.add(need.key)
+                    } else if (isPicked) {
+                        top3.remove(need.key)
+                    }
+                }
+            )
+        }
+
+        Spacer(Modifier.height(80.dp))
+    }
+}
+
+@Composable
+private fun PyramidSlot(rank: Int, needKey: String?, onRemove: () -> Unit) {
+    val s = LocalStrings.current
+    val needLabel = needKey?.let { s.needLabels[it] ?: NEEDS.firstOrNull { n -> n.key == it }?.label }
+    val filled = needKey != null
+    Box(
+        modifier = Modifier
+            .padding(4.dp)
+            .size(width = 110.dp, height = 56.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .background(
+                if (filled) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+            )
+            .border(
+                width = if (filled) 0.dp else 1.dp,
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+                shape = RoundedCornerShape(10.dp)
+            )
+            .clickable(enabled = filled) { onRemove() }
+            .padding(6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "#$rank",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (filled) MaterialTheme.colorScheme.onPrimaryContainer
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Text(
+                needLabel ?: s.empty,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                color = if (filled) MaterialTheme.colorScheme.onPrimaryContainer
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
+
+@Composable
+private fun NeedPickRow(
+    label: String,
+    rating: Int,
+    picked: Boolean,
+    rank: Int?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+) {
+    val s = LocalStrings.current
+    val containerColor = when {
+        picked -> MaterialTheme.colorScheme.primaryContainer
+        !enabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        else -> MaterialTheme.colorScheme.surface
+    }
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onClick() },
+        colors = CardDefaults.cardColors(containerColor = containerColor)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (picked && rank != null) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(8.dp),
-                    color = Color.White,
-                    trackColor = Color.White.copy(alpha = 0.3f),
-                    strokeCap = StrokeCap.Round
-                )
+                        .size(24.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        rank.toString(),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 12.sp
+                    )
+                }
+                Spacer(Modifier.width(10.dp))
+            }
+            Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+            Text(
+                String.format(s.ratingLabel, rating),
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}
 
-                Spacer(modifier = Modifier.height(12.dp))
+// =====================================================================
+//  Step 3 — Beliefs: how well each mode meets your Top-3 needs (1–7)
+// =====================================================================
 
+@Composable
+private fun BeliefsStep(
+    top3: List<String>,
+    beliefs: MutableMap<String, MutableMap<String, Float>>,
+    beliefsNA: MutableMap<String, Boolean>,
+) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            s.beliefsIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            s.beliefsScaleHint,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        if (top3.isEmpty()) {
+            Text(
+                s.beliefsPickFirst,
+                fontSize = 13.sp,
+                color = MaterialTheme.colorScheme.error
+            )
+        }
+        Spacer(Modifier.height(4.dp))
+        MODES.forEach { mode ->
+            BeliefModeCard(
+                mode = mode,
+                top3 = top3,
+                na = beliefsNA[mode.key] ?: false,
+                ratingOf = { needKey -> beliefs[mode.key]?.get(needKey)?.toInt() },
+                onRate = { needKey, value ->
+                    beliefs.getOrPut(mode.key) { mutableStateMapOf() }[needKey] = value.toFloat()
+                },
+                onNA = { isNA -> beliefsNA[mode.key] = isNA },
+            )
+        }
+        Spacer(Modifier.height(80.dp))
+    }
+}
+
+@Composable
+private fun BeliefModeCard(
+    mode: ModeSpec,
+    top3: List<String>,
+    na: Boolean,
+    ratingOf: (String) -> Int?,
+    onRate: (String, Int) -> Unit,
+    onNA: (Boolean) -> Unit,
+) {
+    val s = LocalStrings.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(mode.emoji, fontSize = 24.sp)
+                Spacer(Modifier.width(10.dp))
                 Text(
-                    text = "${(progress * 100).toInt()}%",
-                    fontSize = 14.sp,
-                    color = Color.White.copy(alpha = 0.9f),
+                    s.onbModeLabels[mode.key] ?: mode.label,
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp
+                )
+                FilterChip(
+                    selected = na,
+                    onClick = { onNA(!na) },
+                    label = { Text(s.neverUse, fontSize = 11.sp) }
+                )
+            }
+            if (!na) {
+                top3.forEachIndexed { idx, needKey ->
+                    Spacer(Modifier.height(14.dp))
+                    Text(s.needLabels[needKey] ?: needKey, fontWeight = FontWeight.Medium, fontSize = 14.sp)
+                    if (idx == 0) {
+                        Text(
+                            s.mostImportantNeed,
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    LikertRow(value = ratingOf(needKey), onSelect = { onRate(needKey, it) })
+                }
+            }
+        }
+    }
+}
+
+/** 1–7 selectable buttons, matching the survey mockup. */
+@Composable
+private fun LikertRow(value: Int?, onSelect: (Int) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        (1..7).forEach { n ->
+            val selected = value == n
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    )
+                    .border(
+                        1.dp,
+                        if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.outline.copy(alpha = 0.4f),
+                        RoundedCornerShape(8.dp)
+                    )
+                    .clickable { onSelect(n) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    n.toString(),
+                    color = if (selected) MaterialTheme.colorScheme.onPrimary
+                            else MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Medium,
-                    modifier = Modifier.align(Alignment.CenterHorizontally)
+                    fontSize = 14.sp
                 )
             }
         }
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ProfileResultScreen(
-    result: ClassificationResult,
-    onContinue: () -> Unit
-) {
-    val darkPurple = Color(0xFF7C4DFF)
-    val mediumPurple = Color(0xFF9575CD)
-    val lightPurple = Color(0xFFE1BEE7)
+// =====================================================================
+//  Step 4 — Mode Frequencies (4 modes, 1–5)
+// =====================================================================
 
-    Box(
+@Composable
+private fun FrequenciesStep(frequencies: MutableMap<String, Float>) {
+    val s = LocalStrings.current
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(
-                brush = Brush.verticalGradient(
-                    colors = listOf(darkPurple, mediumPurple, lightPurple)
-                )
-            )
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Scaffold(
-            containerColor = Color.Transparent
-        ) { paddingValues ->
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(paddingValues)
-                    .verticalScroll(rememberScrollState())
-                    .padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Spacer(modifier = Modifier.height(20.dp))
+        Text(
+            s.frequenciesIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            s.frequenciesScaleHint,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(4.dp))
+        MODES.forEach { mode ->
+            FrequencyRow(
+                emoji = mode.emoji,
+                label = s.onbModeLabels[mode.key] ?: mode.label,
+                value = frequencies[mode.key] ?: 1f,
+                onChange = { frequencies[mode.key] = it }
+            )
+        }
+        Spacer(Modifier.height(80.dp))
+    }
+}
 
-                // Profile Icon with animation
-                var iconScale by remember { mutableStateOf(0f) }
-                LaunchedEffect(Unit) {
-                    delay(200)
-                    iconScale = 1f
-                }
-
-                val scale by animateFloatAsState(
-                    targetValue = iconScale,
-                    animationSpec = spring(
-                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                        stiffness = Spring.StiffnessLow
-                    ),
-                    label = "icon_scale"
-                )
-
-                Text(
-                    text = result.profile.icon,
-                    fontSize = 120.sp,
-                    modifier = Modifier.scale(scale)
-                )
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Profile Name
-                Text(
-                    text = "You're a",
-                    fontSize = 20.sp,
-                    color = Color.White.copy(alpha = 0.9f),
-                    fontWeight = FontWeight.Medium
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                Text(
-                    text = result.profile.name,
-                    fontSize = 32.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White,
-                    textAlign = TextAlign.Center
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Confidence badge
-                Card(
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.White.copy(alpha = 0.2f)
-                    )
+@Composable
+private fun FrequencyRow(emoji: String, label: String, value: Float, onChange: (Float) -> Unit) {
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(emoji, fontSize = 22.sp)
+                Spacer(Modifier.width(10.dp))
+                Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                Box(
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        text = "${result.confidence.toInt()}% match",
-                        fontSize = 14.sp,
+                        value.toInt().toString(),
                         fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
                     )
                 }
+            }
+            Slider(value = value, onValueChange = onChange, valueRange = 1f..5f, steps = 3)
+        }
+    }
+}
 
-                Spacer(modifier = Modifier.height(32.dp))
+// =====================================================================
+//  Step 4 — Emoval (emoji slider per mode, with "No answer")
+// =====================================================================
 
-                // Description Card
-                Card(
+@Composable
+private fun EmovalStep(
+    valences: MutableMap<String, Float>,
+    valencesNA: MutableMap<String, Boolean>,
+) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            s.emovalIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            s.emovalHint,
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Spacer(Modifier.height(4.dp))
+        MODES.forEach { mode ->
+            ValenceCard(
+                emoji = mode.emoji,
+                label = s.onbModeLabels[mode.key] ?: mode.label,
+                value = valences[mode.key] ?: 4f,
+                na = valencesNA[mode.key] ?: false,
+                onValue = { valences[mode.key] = it },
+                onNA = { valencesNA[mode.key] = it }
+            )
+        }
+        Spacer(Modifier.height(80.dp))
+    }
+}
+
+@Composable
+private fun ValenceCard(
+    emoji: String,
+    label: String,
+    value: Float,
+    na: Boolean,
+    onValue: (Float) -> Unit,
+    onNA: (Boolean) -> Unit,
+) {
+    val s = LocalStrings.current
+    val faceEmoji = when {
+        na          -> "😐"   // neutral
+        value <= 2f -> "😡"   // angry
+        value <= 3f -> "🙁"   // frown
+        value <= 4f -> "😐"   // neutral
+        value <= 5f -> "🙂"   // slight smile
+        value <= 6f -> "😊"   // smile
+        else        -> "😍"   // heart eyes
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(emoji, fontSize = 22.sp)
+                Spacer(Modifier.width(10.dp))
+                Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                Text(faceEmoji, fontSize = 26.sp)
+            }
+            if (!na) {
+                Slider(value = value, onValueChange = onValue, valueRange = 1f..7f, steps = 5)
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.White.copy(alpha = 0.95f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        Text(
-                            text = result.profile.detailedDescription,
-                            fontSize = 16.sp,
-                            color = Color.Black.copy(alpha = 0.8f),
-                            lineHeight = 24.sp
-                        )
-                    }
+                    Text(s.negative, fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(s.positive, fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Characteristics
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.White.copy(alpha = 0.95f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        Text(
-                            text = "✨ Your Characteristics",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = darkPurple
-                        )
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        result.profile.characteristics.forEach { characteristic ->
-                            Row(
-                                modifier = Modifier.padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Text(
-                                    text = "•",
-                                    fontSize = 16.sp,
-                                    color = darkPurple,
-                                    modifier = Modifier.padding(end = 8.dp)
-                                )
-                                Text(
-                                    text = characteristic,
-                                    fontSize = 15.sp,
-                                    color = Color.Black.copy(alpha = 0.8f),
-                                    lineHeight = 22.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-
-                // Recommendations
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = Color.White.copy(alpha = 0.95f)
-                    ),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-                ) {
-                    Column(
-                        modifier = Modifier.padding(24.dp)
-                    ) {
-                        Text(
-                            text = "🎯 Recommended Transport",
-                            fontSize = 18.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = darkPurple
-                        )
-
-                        Spacer(modifier = Modifier.height(16.dp))
-
-                        result.profile.recommendations.forEach { recommendation ->
-                            Row(
-                                modifier = Modifier.padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.Top
-                            ) {
-                                Text(
-                                    text = "•",
-                                    fontSize = 16.sp,
-                                    color = darkPurple,
-                                    modifier = Modifier.padding(end = 8.dp)
-                                )
-                                Text(
-                                    text = recommendation,
-                                    fontSize = 15.sp,
-                                    color = Color.Black.copy(alpha = 0.8f),
-                                    lineHeight = 22.sp
-                                )
-                            }
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(32.dp))
-
-                // Continue Button
-                Button(
-                    onClick = onContinue,
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(vertical = 18.dp)
-                ) {
-                    Text(
-                        text = "Let's Go!",
-                        color = darkPurple,
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
+            } else {
+                Spacer(Modifier.height(20.dp))
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Checkbox(checked = na, onCheckedChange = { onNA(it) })
+                Text(s.noExperience, fontSize = 12.sp)
             }
         }
     }
+}
+
+// =====================================================================
+//  Step 5 — Generating
+// =====================================================================
+
+@OptIn(ExperimentalAnimationApi::class)
+@Composable
+private fun GeneratingStep(generating: Boolean, error: String?, onRetry: () -> Unit, onOffline: () -> Unit) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        if (generating) {
+            BrainPulseAnimation()
+            Spacer(Modifier.height(40.dp))
+
+            val stages = listOf(
+                s.genStage1, s.genStage2, s.genStage3, s.genStage4, s.genStage5, s.genStage6,
+            )
+            var stageIdx by remember { mutableStateOf(0) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    delay(900)
+                    if (stageIdx < stages.size - 1) stageIdx++
+                    else break
+                }
+            }
+            AnimatedContent(
+                targetState = stages[stageIdx],
+                transitionSpec = {
+                    (fadeIn(tween(400)) + slideInVertically(tween(400)) { it / 3 })
+                        .togetherWith(fadeOut(tween(200)) + slideOutVertically(tween(200)) { -it / 3 })
+                },
+                label = "stage_text"
+            ) { text ->
+                Text(
+                    text,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    textAlign = TextAlign.Center,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            ThinkingDots()
+            Spacer(Modifier.height(20.dp))
+            Text(
+                s.generatingServer,
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        } else if (error != null) {
+            Icon(
+                Icons.Default.Close,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(48.dp)
+            )
+            Spacer(Modifier.height(16.dp))
+            Text(s.genErrTitle, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                error,
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                s.genErrHelp,
+                fontSize = 11.sp,
+                textAlign = TextAlign.Center,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Spacer(Modifier.height(24.dp))
+            Button(onClick = onRetry) { Text(s.tryAgain) }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = onOffline) { Text(s.useOffline) }
+        }
+    }
+}
+
+@Composable
+private fun BrainPulseAnimation() {
+    val infinite = rememberInfiniteTransition(label = "brain")
+    val scale1 by infinite.animateFloat(
+        initialValue = 0.7f,
+        targetValue = 1.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "scale1",
+    )
+    val scale2 by infinite.animateFloat(
+        initialValue = 0.7f,
+        targetValue = 1.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, delayMillis = 500, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "scale2",
+    )
+    val alpha1 by infinite.animateFloat(
+        initialValue = 0.55f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "alpha1",
+    )
+    val alpha2 by infinite.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1600, delayMillis = 500, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Restart,
+        ),
+        label = "alpha2",
+    )
+    val coreScale by infinite.animateFloat(
+        initialValue = 1f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "core",
+    )
+
+    val primary = MaterialTheme.colorScheme.primary
+
+    Box(
+        modifier = Modifier.size(180.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(140.dp)
+                .scale(scale1)
+                .clip(CircleShape)
+                .background(primary.copy(alpha = alpha1)),
+        )
+        Box(
+            modifier = Modifier
+                .size(120.dp)
+                .scale(scale2)
+                .clip(CircleShape)
+                .background(primary.copy(alpha = alpha2)),
+        )
+        Box(
+            modifier = Modifier
+                .size(86.dp)
+                .scale(coreScale)
+                .clip(CircleShape)
+                .background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("🧠", fontSize = 44.sp)
+        }
+    }
+}
+
+@Composable
+private fun ThinkingDots() {
+    val infinite = rememberInfiniteTransition(label = "dots")
+    val dotCount = 3
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (i in 0 until dotCount) {
+            val scale by infinite.animateFloat(
+                initialValue = 0.6f,
+                targetValue = 1.2f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(600, easing = LinearOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = androidx.compose.animation.core.StartOffset(i * 150),
+                ),
+                label = "dot$i",
+            )
+            Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .scale(scale)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary)
+            )
+        }
+    }
+}
+
+// =====================================================================
+//  Step 6 — Result
+// =====================================================================
+
+@Composable
+private fun ResultStep(aiRead: String?, aiReady: Boolean) {
+    val s = LocalStrings.current
+    var appear by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { appear = true }
+    val badgeScale by animateFloatAsState(
+        targetValue = if (appear) 1f else 0.5f,
+        animationSpec = tween(600, easing = LinearOutSlowInEasing), label = "badge"
+    )
+    val fade by animateFloatAsState(
+        targetValue = if (appear) 1f else 0f,
+        animationSpec = tween(700), label = "fade"
+    )
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(8.dp))
+        Box(
+            modifier = Modifier
+                .size(96.dp)
+                .scale(badgeScale)
+                .clip(CircleShape)
+                .background(Mob.brandGradient),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("🪪", fontSize = 46.sp)
+        }
+        Spacer(Modifier.height(20.dp))
+        Text(
+            s.resultReady,
+            fontSize = 22.sp,
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.alpha(fade)
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            s.resultSubtitle,
+            fontSize = 13.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.alpha(fade)
+        )
+        Spacer(Modifier.height(20.dp))
+
+        // ✨ gpt-5.4 personality read — shows the model's own narrative instantly,
+        // then upgrades to the LLM read when it arrives (or stays if the LLM fails).
+        Card(
+            modifier = Modifier.fillMaxWidth().alpha(fade),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    s.travelPersonality,
+                    fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Spacer(Modifier.height(8.dp))
+                when {
+                    aiRead != null -> Text(
+                        aiRead,
+                        fontSize = 14.sp, lineHeight = 20.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                    !aiReady -> Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(16.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(
+                            s.readingProfile,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                    else -> Text(
+                        s.resultSubtitle,
+                        fontSize = 14.sp, lineHeight = 20.sp,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+        // No "preferred mode" here on purpose — the personalization shows up in the
+        // route suggestions, not as a single label.
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .alpha(fade)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("✓", fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary)
+            Spacer(Modifier.width(12.dp))
+            Text(
+                s.resultTailored,
+                fontSize = 13.sp, lineHeight = 18.sp,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+        }
+
+        Spacer(Modifier.height(60.dp))
+    }
+}
+
+// =====================================================================
+//  Bottom navigation bar
+// =====================================================================
+
+@Composable
+private fun BottomBar(
+    step: Int,
+    canAdvance: Boolean,
+    generating: Boolean,
+    aiReady: Boolean,
+    onBack: () -> Unit,
+    onNext: () -> Unit,
+    onFinish: () -> Unit,
+) {
+    val s = LocalStrings.current
+    Surface(tonalElevation = 3.dp) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 12.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (step in 1..5 && !generating) {
+                OutlinedButton(onClick = onBack) { Text(s.back) }
+            }
+            Spacer(Modifier.weight(1f))
+            when (step) {
+                0 -> Button(onClick = onNext) { Text(s.letsBegin) }
+                in 1..5 -> Button(onClick = onNext, enabled = canAdvance) {
+                    Text(if (step == 5) s.generatePassport else s.nextBtn)
+                }
+                6 -> { /* no buttons during generating; retry inside step */ }
+                7 -> if (aiReady) {
+                    Button(onClick = onFinish, modifier = Modifier.fillMaxWidth()) {
+                        Text(s.continueToApp)
+                    }
+                } else {
+                    // AI personality read still in flight — block Continue and show why.
+                    Button(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        Text(s.readingProfile)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// =====================================================================
+//  Survey JSON builder — matches the LimeSurvey format the parser expects
+// =====================================================================
+
+private fun buildSurveyJson(
+    needs: Map<String, Float>,
+    top3: List<String>,
+    frequencies: Map<String, Float>,
+    valences: Map<String, Float>,
+    valencesNA: Map<String, Boolean>,
+    beliefs: Map<String, Map<String, Float>>,
+    beliefsNA: Map<String, Boolean>,
+): String {
+    // APP block — ratings, ranking, beliefs (per-mode ratings for the Top-3 needs).
+    val app = buildJsonObject {
+        put("answers", buildJsonObject {
+            put("ratings", buildJsonObject {
+                needs.forEach { (k, v) -> put(k, v.toInt()) }
+                put("attn_check", 7)   // hidden attention check; required by parser
+            })
+            put("ranking", buildJsonArray { top3.forEach { add(it) } })
+            // beliefs: {mode: {top3_need: 1..7}} for every mode the user DOES use.
+            // The parser reads these Top-3 ratings and imputes the remaining needs.
+            put("beliefs", buildJsonObject {
+                MODES.forEach { mode ->
+                    if (beliefsNA[mode.key] != true) {
+                        put(mode.key, buildJsonObject {
+                            top3.forEach { needKey ->
+                                put(needKey, (beliefs[mode.key]?.get(needKey) ?: 4f).toInt())
+                            }
+                        })
+                    }
+                }
+            })
+            // Modes marked "I never use / no opinion" → omitted above + imputed.
+            put("skippedModes", buildJsonArray {
+                MODES.forEach { if (beliefsNA[it.key] == true) add(it.key) }
+            })
+        })
+    }
+
+    // MOBIL block — frequencies for both scenarios (s1 = work, s2 = leisure).
+    // We collect once and duplicate to both scenarios.
+    val mobil = buildJsonObject {
+        frequencies.forEach { (m, v) ->
+            put("s1_$m", v.toInt())
+            put("s2_$m", v.toInt())
+        }
+    }
+
+    // emoval block — slider 1..7 → emoval -3..+3; NA stays as "NA"
+    val emoval = buildJsonObject {
+        put("answers", buildJsonObject {
+            MODES.forEach { mode ->
+                val isNA = valencesNA[mode.key] ?: false
+                if (isNA) {
+                    put(mode.key, "NA")
+                } else {
+                    val v = (valences[mode.key] ?: 4f).toInt() - 4  // -3..+3
+                    put(mode.key, v)
+                }
+            }
+        })
+    }
+
+    val survey = buildJsonObject {
+        put("id", 1)
+        put("PROFILE", "{\"answers\":{}}")
+        put("MOBIL", mobil.toString())
+        put("APP", app.toString())
+        put("emoval", emoval.toString())
+        // 'What matters in life' (values) question was removed. The parser still
+        // requires the section to exist, so send it empty → all value orientations
+        // default to neutral (values are display-only in the baseline model).
+        put("values", "{\"answers\":{}}")
+        put("POI", "[]")
+    }
+    return survey.toString()
+}
+
+// =====================================================================
+//  Passport summary parsing (for the result step)
+// =====================================================================
+
+internal data class PassportSummary(
+    val mode: String,
+    val confidence: Double,
+)
+
+internal fun summarizePassport(passportJson: String): PassportSummary? = try {
+    val cp = Json.parseToJsonElement(passportJson).jsonObject["cognitive_passport"]?.jsonObject
+    val deliberation = cp?.get("deliberation")?.jsonObject
+    PassportSummary(
+        mode       = deliberation?.get("final_choice")?.jsonPrimitive?.content ?: "?",
+        confidence = deliberation?.get("confidence")?.jsonPrimitive?.doubleOrNull ?: 0.0,
+    )
+} catch (_: Exception) { null }
+
+// =====================================================================
+//  Derive a ClassificationResult so MainActivity's downstream screens
+//  (which still expect the old 5-category profile) can keep working.
+// =====================================================================
+
+private fun derivedClassification(
+    needs: Map<String, Float>,
+    summary: PassportSummary,
+): ClassificationResult {
+    val topNeed = needs.maxByOrNull { it.value }?.key
+    val profileType = when (topNeed) {
+        "env", "health_activity" -> ProfileType.ECO_WARRIOR
+        "comfort_physical", "safety_crime", "crowding" -> ProfileType.COMFORT_SEEKER
+        "time", "flex"                                 -> ProfileType.TIME_OPTIMIZER
+        "cost"                                         -> ProfileType.BUDGET_CONSCIOUS
+        else                                           -> ProfileType.FLEXIBLE_PRAGMATIST
+    }
+    val classifier = MobilityClassifier()
+    val profile = classifier.getProfile(profileType)
+        ?: classifier.getProfile(ProfileType.FLEXIBLE_PRAGMATIST)!!
+    return ClassificationResult(
+        profileType  = profileType,
+        profile      = profile,
+        scores       = ProfileType.values().associate { it to 0f },
+        confidence   = (summary.confidence * 100).toFloat(),
+        explanations = listOf("Derived from cognitive passport (mode: ${summary.mode}).")
+    )
+}
+
+private fun fallbackClassification(): ClassificationResult {
+    val classifier = MobilityClassifier()
+    val profile = classifier.getProfile(ProfileType.FLEXIBLE_PRAGMATIST)!!
+    return ClassificationResult(
+        profileType  = ProfileType.FLEXIBLE_PRAGMATIST,
+        profile      = profile,
+        scores       = ProfileType.values().associate { it to 0f },
+        confidence   = 50f,
+        explanations = listOf("Fallback profile.")
+    )
 }
