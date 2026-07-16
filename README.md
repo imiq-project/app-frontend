@@ -6,7 +6,7 @@ to travel: walking, bike, bus/tram or car.
 The app learns what **you** care about like saving money, comfort, safety, the environment, being
 active and then ranks the travel options for you personally.
 
-## The pipeline, step by step
+## The Pipeline
 
 **1. Sign in.**
 You enter an access code. The app sends it to the IMIQ login server and gets a
