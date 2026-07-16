@@ -14,7 +14,7 @@ token back.
 
 **2. Answer a short survey.**
 You rate 11 travel needs (comfort, cost, time, safety, environment, ...), pick
-your top 3, say how often you use each transport mode, and how you feel about
+your top 3, say how often you use each transport mode and how you feel about
 each mode (with emoji sliders).
 
 **3. The server builds your "cognitive passport".**
