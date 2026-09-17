@@ -14,9 +14,9 @@ import java.util.concurrent.TimeUnit
 //   POST https://imiq-app.et.uni-magdeburg.de/api/routing/ranked-routes
 // Returns ranked mode options + per-mode value-fit breakdowns (the "why this
 // mode"), but NO map geometry — polylines come from GraphHopper separately.
-// DTOs modelled against the live 2026-06-04 response (deployed = old 9-dim
-// contract). The `cognitive_passport` field is the adapted 9-dim object from
-// PassportAdapter; sent as a raw JsonObject so the engine reads it directly.
+// The `cognitive_passport` field is the strict 11-need v4.3 object from
+// PassportAdapter. Deploy a routing-engine build that accepts all eleven need
+// axes and the four user-reported availability flags before this client.
 // ---------------------------------------------------------------------------
 
 data class GeoPoint2(val lat: Double, val lon: Double)

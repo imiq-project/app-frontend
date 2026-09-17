@@ -1,4 +1,4 @@
-name: Android CI
+﻿name: Android CI
 
 on:
   push:
@@ -19,23 +19,23 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: gradle
 
       - name: Validate Gradle wrapper
-        uses: gradle/wrapper-validation-action@v2
+        uses: gradle/actions/wrapper-validation@v4
 
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+      - name: Run production unit tests
+        run: ./gradlew :app:testProductionDebugUnitTest --stacktrace
 
-      - name: Run Unit Tests
-        run: ./gradlew :app:testDebugUnitTest --stacktrace
-        continue-on-error: true
+      - name: Build production debug APK
+        run: ./gradlew :app:assembleProductionDebug --stacktrace
 
-      - name: Upload APK
+      - name: Upload production APK
         uses: actions/upload-artifact@v4
-        if: success()
         with:
-          name: app-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: imiq-production-debug
+          path: app/build/outputs/apk/production/debug/*.apk
+          if-no-files-found: error

@@ -7,28 +7,33 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import com.google.android.gms.tasks.CancellationTokenSource
 import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 import kotlin.coroutines.suspendCoroutine
 
 class LocationHelper(context: Context) {
     private val fusedLocationClient: FusedLocationProviderClient =
         LocationServices.getFusedLocationProviderClient(context)
 
-    suspend fun getCurrentLocation(): Pair<Double, Double>? = suspendCoroutine { continuation ->
+    /**
+     * An explicitly user-selected manual origin takes precedence for the current
+     * planning session. Otherwise a fresh device location is requested. No static
+     * coordinate is ever substituted silently.
+     */
+    suspend fun getCurrentLocation(): Pair<Double, Double>? {
+        TripOriginStore.manualOrigin()?.let { return it.lat to it.lon }
+        return getMeasuredDeviceLocation()
+    }
+
+    suspend fun getMeasuredDeviceLocation(): Pair<Double, Double>? = suspendCoroutine { continuation ->
         try {
             fusedLocationClient.getCurrentLocation(
                 Priority.PRIORITY_HIGH_ACCURACY,
                 CancellationTokenSource().token
             ).addOnSuccessListener { location: Location? ->
-                if (location != null) {
-                    continuation.resume(Pair(location.latitude, location.longitude))
-                } else {
-                    continuation.resume(null)
-                }
-            }.addOnFailureListener { exception ->
-                continuation.resumeWithException(exception)
+                continuation.resume(location?.let { it.latitude to it.longitude })
+            }.addOnFailureListener {
+                continuation.resume(null)
             }
-        } catch (e: SecurityException) {
+        } catch (_: SecurityException) {
             continuation.resume(null)
         }
     }

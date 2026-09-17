@@ -16,7 +16,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -30,12 +29,10 @@ fun SettingsScreen(
 ) {
     val s = LocalStrings.current
     var showConfirm by remember { mutableStateOf(false) }
+    var companionName by remember { mutableStateOf(TokenManager.companionName().orEmpty()) }
+    var companionError by remember { mutableStateOf<String?>(null) }
     val name = remember { TokenManager.getUserName()?.takeIf { it.isNotBlank() } ?: "You" }
     val currentLang = LanguageState.current
-
-    var ecoRoutes by remember { mutableStateOf(true) }
-    var avoidUnlit by remember { mutableStateOf(false) }
-    var liveContext by remember { mutableStateOf(true) }
 
     if (showConfirm) {
         AlertDialog(
@@ -107,7 +104,11 @@ fun SettingsScreen(
                         Spacer(Modifier.width(14.dp))
                         Column(Modifier.weight(1f)) {
                             Text(name, color = Mob.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                            Text(s.bikeLeaningProfile, color = Mob.primary, fontSize = 13.sp)
+                            Text(
+                                if (LanguageState.current == AppLanguage.DE) "Kognitiver Pass" else "Cognitive Passport",
+                                color = Mob.primary,
+                                fontSize = 13.sp,
+                            )
                         }
                         Icon(Icons.Default.Verified, null, tint = Mob.primary, modifier = Modifier.size(20.dp))
                     }
@@ -130,19 +131,31 @@ fun SettingsScreen(
                 }
 
                 Spacer(Modifier.height(24.dp))
-                MobSectionLabel(s.routingPreferences)
-                Spacer(Modifier.height(10.dp))
-                MobGlassCard(padding = 6.dp) {
-                    ToggleRow(Icons.Default.Eco, s.prefEcoTitle, s.prefEcoSub, ecoRoutes) { ecoRoutes = it }
-                    Divider()
-                    ToggleRow(Icons.Default.Shield, s.prefUnlitTitle, s.prefUnlitSub, avoidUnlit) { avoidUnlit = it }
-                    Divider()
-                    ToggleRow(Icons.Default.Sensors, s.prefLiveTitle, s.prefLiveSub, liveContext) { liveContext = it }
-                }
-
-                Spacer(Modifier.height(24.dp))
                 MobSectionLabel(s.profileSection)
                 Spacer(Modifier.height(10.dp))
+                MobGlassCard {
+                    Text("Digital Companion", color = Mob.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Choose any name you like. You can change it later.", color = Mob.textSecondary, fontSize = 12.sp)
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = companionName,
+                        onValueChange = { companionName = it; companionError = null },
+                        label = { Text("Name your Digital Companion") },
+                        singleLine = true,
+                        isError = companionError != null,
+                        supportingText = companionError?.let { { Text(it) } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = { companionName = ""; DigitalCompanionStore.reset() }) { Text("Reset name") }
+                        Spacer(Modifier.weight(1f))
+                        Button(onClick = {
+                            try { DigitalCompanionStore.save(companionName); companionName = TokenManager.companionName().orEmpty() }
+                            catch (_: IllegalArgumentException) { companionError = "Use 1–24 characters without line breaks." }
+                        }) { Text(if (companionName.isBlank()) "Skip" else "Save") }
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
                 MobGlassCard {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircleGlyph(Icons.Default.Refresh, Mob.primary, diameter = 42.dp)
@@ -174,43 +187,6 @@ fun SettingsScreen(
             }
         }
     }
-}
-
-@Composable
-private fun ToggleRow(
-    icon: ImageVector,
-    title: String,
-    sub: String,
-    checked: Boolean,
-    onCheckedChange: (Boolean) -> Unit
-) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(icon, null, tint = Mob.textSecondary, modifier = Modifier.size(20.dp))
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(title, color = Mob.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
-            Text(sub, color = Mob.textMuted, fontSize = 11.sp)
-        }
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = Mob.onPrimary,
-                checkedTrackColor = Mob.primary,
-                uncheckedThumbColor = Mob.textMuted,
-                uncheckedTrackColor = Mob.surfaceHi,
-                uncheckedBorderColor = Mob.border
-            )
-        )
-    }
-}
-
-@Composable
-private fun Divider() {
-    Box(Modifier.fillMaxWidth().padding(horizontal = 12.dp).height(1.dp).background(Mob.border))
 }
 
 /** Two-segment EN/DE switch. Tapping a segment flips the whole app instantly. */
