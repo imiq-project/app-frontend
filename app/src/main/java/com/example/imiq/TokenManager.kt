@@ -8,10 +8,9 @@ object TokenManager {
     private const val PREF_NAME = "imiq_prefs"
     private const val KEY_TOKEN = "auth_token"
     private const val KEY_USER_NAME = "user_name"
-    private const val KEY_USER_AGE = "user_age"
-    private const val KEY_PROFILE_TYPE = "profile_type"
     private const val KEY_PROFILE_COMPLETED = "profile_completed"
     private const val KEY_LANGUAGE = "app_language"
+    private const val KEY_COMPANION_NAME = "digital_companion_name"
 
     private var sharedPreferences: SharedPreferences? = null
     private var appContext: Context? = null
@@ -33,13 +32,12 @@ object TokenManager {
         return getToken() != null
     }
 
-    // ========== USER PROFILE ==========
+    // ========== QUESTIONNAIRE STATE ==========
 
-    fun saveUserProfile(name: String, age: String, profileType: String) {
+    fun markProfileCompleted(participantId: String) {
+        require(participantId.isNotBlank()) { "participantId must be user-provided" }
         sharedPreferences?.edit()?.apply {
-            putString(KEY_USER_NAME, name)
-            putString(KEY_USER_AGE, age)
-            putString(KEY_PROFILE_TYPE, profileType)
+            putString(KEY_USER_NAME, participantId)
             putBoolean(KEY_PROFILE_COMPLETED, true)
             apply()
         }
@@ -47,17 +45,11 @@ object TokenManager {
 
     fun getUserName(): String? = sharedPreferences?.getString(KEY_USER_NAME, null)
 
-    fun getUserAge(): String? = sharedPreferences?.getString(KEY_USER_AGE, null)
-
-    fun getProfileType(): String? = sharedPreferences?.getString(KEY_PROFILE_TYPE, null)
-
     fun isProfileCompleted(): Boolean = sharedPreferences?.getBoolean(KEY_PROFILE_COMPLETED, false) ?: false
 
     fun clearProfile() {
         sharedPreferences?.edit()?.apply {
             remove(KEY_USER_NAME)
-            remove(KEY_USER_AGE)
-            remove(KEY_PROFILE_TYPE)
             remove(KEY_PROFILE_COMPLETED)
             apply()
         }
@@ -76,13 +68,12 @@ object TokenManager {
         sharedPreferences?.edit()?.putString(KEY_LANGUAGE, code)?.apply()
     }
 
-    // ========== COGNITIVE PASSPORT ==========
+    fun companionName(): String? = sharedPreferences?.getString(KEY_COMPANION_NAME, null)
 
-    fun saveCognitivePassportFromTemplate() {
-        appContext?.let { ctx ->
-            val json = ctx.resources.openRawResource(R.raw.cognitive_passport_template)
-                .bufferedReader().use { it.readText() }
-            File(ctx.filesDir, "cognitive_passport.json").writeText(json)
+    fun setCompanionName(value: String?) {
+        sharedPreferences?.edit()?.apply {
+            if (value == null) remove(KEY_COMPANION_NAME) else putString(KEY_COMPANION_NAME, value)
+            apply()
         }
     }
 }

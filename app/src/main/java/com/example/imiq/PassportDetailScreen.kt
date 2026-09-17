@@ -79,9 +79,9 @@ fun PassportDetailScreen(onBack: () -> Unit) {
                     MetadataCard(cp)
                     cp["profile"]?.jsonObject?.let { ProfileCard(it) }
                     cp["deliberation"]?.jsonObject?.let { DeliberationCard(it) }
-                    cp["dissonance_triad"]?.jsonObject?.let { DissonanceCard(it) }
+                    cp["process_diagnostics"]?.jsonObject?.let { ProcessDiagnosticsCard(it) }
                     cp["routing_parameters"]?.jsonObject?.let { RoutingCard(it) }
-                    cp["xai_summary"]?.jsonObject?.let { XaiCard(it) }
+                    cp["xai_diagnostics"]?.jsonObject?.let { XaiDiagnosticsCard(it) }
                     cp["agent_profile"]?.jsonObject?.let { AgentProfileCard(it) }
                     cp["spatial_context"]?.jsonObject?.let { SpatialContextCard(it) }
                     cp["top_needs_ranking"]?.jsonArray?.let { TopNeedsCard(it) }
@@ -141,6 +141,7 @@ private fun MetadataCard(cp: JsonObject) {
     val s = LocalStrings.current
     SectionCard(s.pdMetadata, s.pdMetadataSub) {
         KvRow("Agent ID", cp["agent_id"]?.jsonPrimitive?.content)
+        KvRow("Passport schema", cp["schema_version"]?.jsonPrimitive?.content)
         KvRow("Version", cp["version"]?.jsonPrimitive?.content)
         KvRow("Model", cp["model"]?.jsonPrimitive?.content)
         KvRow("Generated at", cp["timestamp"]?.jsonPrimitive?.content)
@@ -162,8 +163,30 @@ private fun ProfileCard(profile: JsonObject) {
             Text("Needs (0–1)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             needs.forEach { (k, v) ->
-                val f = v.jsonPrimitive.doubleOrNull ?: 0.0
-                BarRow(label = k, value = f.toFloat())
+                v.jsonPrimitive.doubleOrNull?.let { f ->
+                    BarRow(label = k, value = f.toFloat())
+                }
+            }
+        }
+        profile["valences"]?.jsonObject?.let { valences ->
+            Spacer(Modifier.height(8.dp))
+            Text("Action valences (-1 to +1)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            valences.forEach { (mode, value) ->
+                KvRow(prettyMode(mode), value.jsonPrimitive.doubleOrNull?.let { "%.3f".format(it) })
+            }
+        }
+        profile["availability"]?.jsonObject?.let { availability ->
+            Spacer(Modifier.height(8.dp))
+            Text("User-reported availability", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            availability.forEach { (mode, value) ->
+                KvRow(
+                    prettyMode(mode),
+                    value.jsonPrimitive.booleanOrNull?.let {
+                        if (it) "available" else "not available"
+                    }
+                )
             }
         }
         profile["environmental_tolerances"]?.jsonObject?.let { tols ->
@@ -172,8 +195,9 @@ private fun ProfileCard(profile: JsonObject) {
                 fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             tols.forEach { (k, v) ->
-                val f = v.jsonPrimitive.doubleOrNull ?: 0.0
-                BarRow(label = k, value = f.toFloat())
+                v.jsonPrimitive.doubleOrNull?.let { f ->
+                    BarRow(label = k, value = f.toFloat())
+                }
             }
             profile["tolerance_note"]?.jsonPrimitive?.contentOrNull?.let {
                 Spacer(Modifier.height(4.dp))
@@ -186,8 +210,9 @@ private fun ProfileCard(profile: JsonObject) {
             Text("Schwartz values (0–1)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             values.forEach { (k, v) ->
-                val f = v.jsonPrimitive.doubleOrNull ?: 0.0
-                BarRow(label = k, value = f.toFloat())
+                v.jsonPrimitive.doubleOrNull?.let { f ->
+                    BarRow(label = k, value = f.toFloat())
+                }
             }
         }
     }
@@ -197,103 +222,67 @@ private fun ProfileCard(profile: JsonObject) {
 private fun DeliberationCard(delib: JsonObject) {
     val s = LocalStrings.current
     SectionCard(s.pdDeliberation, s.pdDeliberationSub) {
-        val finalChoice = delib["final_choice"]?.jsonPrimitive?.contentOrNull
-        finalChoice?.let {
-            Text("Chose ${prettyMode(it)}", fontSize = 22.sp, fontWeight = FontWeight.Bold,
+        val tendency = delib["terminal_tendency"]?.jsonPrimitive?.contentOrNull
+        tendency?.let {
+            Text("Terminal tendency: ${prettyMode(it)}", fontSize = 22.sp, fontWeight = FontWeight.Bold,
                 color = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.height(8.dp))
         }
-        delib["probabilities"]?.jsonObject?.let { probs ->
-            Text("Mode probabilities", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        delib["comparative_readout"]?.jsonObject?.let { readout ->
+            Text("Comparative latent-action readout", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
-            probs.forEach { (mode, p) ->
-                BarRow(label = prettyMode(mode),
-                       value = (p.jsonPrimitive.doubleOrNull ?: 0.0).toFloat(),
-                       showPercent = true)
+            readout.forEach { (mode, p) ->
+                p.jsonPrimitive.doubleOrNull?.let { value ->
+                    BarRow(label = prettyMode(mode), value = value.toFloat(), showPercent = true)
+                }
             }
         }
         Spacer(Modifier.height(8.dp))
-        KvRow("Confidence",
-            delib["confidence"]?.jsonPrimitive?.doubleOrNull?.let { "${"%.2f".format(it * 100)}%" })
-        KvRow("Reaction time",
-            delib["reaction_time_seconds"]?.jsonPrimitive?.doubleOrNull?.let { "${"%.2f".format(it)}s" })
-        KvRow("Decision difficulty", delib["decision_difficulty"]?.jsonPrimitive?.contentOrNull)
-        KvRow("Convergence",
-            delib["convergence_achieved"]?.jsonPrimitive?.booleanOrNull?.let {
+        KvRow("Terminal margin",
+            delib["terminal_margin"]?.jsonPrimitive?.doubleOrNull?.let { "%.4f".format(it) })
+        KvRow("Practically differentiated",
+            delib["practically_differentiated"]?.jsonPrimitive?.booleanOrNull?.toString())
+        KvRow("Settling time (model units)",
+            delib["settling_time_model_units"]?.jsonPrimitive?.doubleOrNull?.let { "%.2f".format(it) })
+        KvRow("Operational settling",
+            delib["settling_achieved"]?.jsonPrimitive?.booleanOrNull?.let {
                 if (it) "achieved" else "not achieved"
             })
+        delib["readout_interpretation"]?.jsonPrimitive?.contentOrNull?.let {
+            Spacer(Modifier.height(6.dp))
+            Text(it, fontSize = 10.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
 @Composable
-private fun DissonanceCard(diss: JsonObject) {
+private fun ProcessDiagnosticsCard(diagnostics: JsonObject) {
     val s = LocalStrings.current
     SectionCard(s.pdDissonance, s.pdDissonanceSub) {
-        KvRow("Dissonance type", diss["dissonance_type"]?.jsonPrimitive?.contentOrNull)
-        KvRow("Base preference",
-            diss["base_preference"]?.jsonPrimitive?.contentOrNull?.let { prettyMode(it) })
-        KvRow("Final choice",
-            diss["final_choice"]?.jsonPrimitive?.contentOrNull?.let { prettyMode(it) })
-        KvRow("Preference shifted",
-            diss["preference_shifted"]?.jsonPrimitive?.booleanOrNull?.let {
-                if (it) "yes" else "no"
-            })
-        diss["shift_explanation"]?.jsonPrimitive?.contentOrNull?.let {
-            Spacer(Modifier.height(6.dp))
-            Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        diagnostics["input_organization"]?.jsonObject?.let { input ->
+            Text("Input organization", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            KvRow("Cognitive-affective alignment", renderJsonValue(input["cognitive_affective_alignment"] ?: JsonNull))
+            KvRow("Cognitive-affective incongruence", renderJsonValue(input["cognitive_affective_incongruence"] ?: JsonNull))
+            KvRow("Support cancellation", renderJsonValue(input["support_cancellation"] ?: JsonNull))
+            KvRow("Mixed-sign cognitive support", renderJsonValue(input["mixed_sign_cognitive_support"] ?: JsonNull))
         }
-
-        Spacer(Modifier.height(8.dp))
-        Text("Structural (C) — cognitive ambivalence",
-            fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        KvRow("C_structural",
-            diss["C_structural"]?.jsonPrimitive?.doubleOrNull?.let { "%.4f".format(it) })
-        KvRow("Interpretation", diss["C_interpretation"]?.jsonPrimitive?.contentOrNull)
-
-        Spacer(Modifier.height(8.dp))
-        Text("Behavioral (D) — outcome divergence",
-            fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        KvRow("D_behavioral",
-            diss["D_behavioral"]?.jsonPrimitive?.intOrNull?.toString())
-        KvRow("Interpretation", diss["D_behavioral_interpretation"]?.jsonPrimitive?.contentOrNull)
-        KvRow("D_behavioral continuous",
-            diss["D_behavioral_continuous"]?.jsonPrimitive?.doubleOrNull?.let { "%.4f".format(it) })
-        KvRow("Continuous interp",
-            diss["D_behavioral_continuous_interpretation"]?.jsonPrimitive?.contentOrNull)
-
-        Spacer(Modifier.height(8.dp))
-        Text("Environmental (D_env)", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(4.dp))
-        KvRow("D_environmental",
-            diss["D_environmental"]?.jsonPrimitive?.doubleOrNull?.let { "%.4f".format(it) })
-        KvRow("Note", diss["D_environmental_note"]?.jsonPrimitive?.contentOrNull)
-
-        diss["extended_process_diagnostics"]?.jsonObject?.let { ext ->
-            Spacer(Modifier.height(12.dp))
-            HorizontalDivider()
+        diagnostics["action_process"]?.jsonObject?.let { action ->
             Spacer(Modifier.height(8.dp))
-            Text("Extended diagnostics", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-            Spacer(Modifier.height(6.dp))
-            ext["cognitive"]?.jsonObject?.let { sub ->
-                Text("Cognitive", fontWeight = FontWeight.Medium, fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary)
-                sub.forEach { (k, v) -> KvRow(k, renderJsonValue(v)) }
-                Spacer(Modifier.height(6.dp))
-            }
-            ext["affective"]?.jsonObject?.let { sub ->
-                Text("Affective", fontWeight = FontWeight.Medium, fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary)
-                sub.forEach { (k, v) -> KvRow(k, renderJsonValue(v)) }
-                Spacer(Modifier.height(6.dp))
-            }
-            ext["cognitive_affective"]?.jsonObject?.let { sub ->
-                Text("Cognitive-affective", fontWeight = FontWeight.Medium, fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.primary)
-                sub.forEach { (k, v) -> KvRow(k, renderJsonValue(v)) }
-            }
+            Text("Action process", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            action.forEach { (key, value) -> KvRow(key, renderJsonValue(value)) }
         }
+        diagnostics["settling"]?.jsonObject?.let { settling ->
+            Spacer(Modifier.height(8.dp))
+            Text("Computational settling", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            settling.forEach { (key, value) -> KvRow(key, renderJsonValue(value)) }
+        }
+        diagnostics["active_constraint_tension_terminal"]?.jsonObject
+            ?.get("total")?.jsonObject?.let { total ->
+                Spacer(Modifier.height(8.dp))
+                Text("Terminal active tension", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                total.forEach { (key, value) -> KvRow(key, renderJsonValue(value)) }
+            }
     }
 }
 
@@ -305,9 +294,9 @@ private fun RoutingCard(routing: JsonObject) {
             Text("Mode weights", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             mw.forEach { (mode, p) ->
-                BarRow(label = prettyMode(mode),
-                       value = (p.jsonPrimitive.doubleOrNull ?: 0.0).toFloat(),
-                       showPercent = true)
+                p.jsonPrimitive.doubleOrNull?.let { value ->
+                    BarRow(label = prettyMode(mode), value = value.toFloat(), showPercent = true)
+                }
             }
         }
         routing["utility_coefficients"]?.jsonObject?.let { uc ->
@@ -315,7 +304,7 @@ private fun RoutingCard(routing: JsonObject) {
             Text("Utility coefficients", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             uc.forEach { (k, v) ->
-                KvRow(k, (v.jsonPrimitive.doubleOrNull ?: 0.0).let { "%.4f".format(it) })
+                KvRow(k, v.jsonPrimitive.doubleOrNull?.let { "%.4f".format(it) })
             }
         }
         routing["contextual_flags"]?.jsonObject?.let { cf ->
@@ -331,31 +320,93 @@ private fun RoutingCard(routing: JsonObject) {
 }
 
 @Composable
-private fun XaiCard(xai: JsonObject) {
+private fun XaiDiagnosticsCard(xai: JsonObject) {
     val s = LocalStrings.current
     SectionCard(s.pdXai, s.pdXaiSub) {
-        xai["decision_narrative"]?.jsonPrimitive?.contentOrNull?.let {
-            Text(it, fontSize = 13.sp)
+        KvRow("XAI schema", xai["schema_version"]?.jsonPrimitive?.contentOrNull)
+
+        val summary = xai["winner_summary"]?.jsonObject
+        summary?.let {
+            Spacer(Modifier.height(6.dp))
+            Text("Winner explanation", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            KvRow("Terminal tendency", it["mode"]?.jsonPrimitive?.contentOrNull?.let(::prettyMode))
+            KvRow("Main rival", it["main_rival"]?.jsonPrimitive?.contentOrNull?.let(::prettyMode))
+            KvRow("Cognitive signed input", signedNumber(it["terminal_cognitive_signed_input"]))
+            KvRow("Affective signed input", signedNumber(it["terminal_affective_signed_input"]))
+            KvRow("Cognitive-affective friction", decimalNumber(it["terminal_cognitive_affective_friction"]))
+            KvRow("Mixed cognitive support", decimalNumber(it["terminal_mixed_cognitive_support"]))
+
+            it["top_supporters_terminal"]?.jsonArray?.let { supporters ->
+                if (supporters.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Strongest supporting needs", fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary)
+                    supporters.forEach { item ->
+                        val obj = item.jsonObject
+                        val need = obj["need"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                        val value = signedNumber(obj["signed_input"])
+                        Text("• ${prettyNeed(need)}${value?.let { "  ($it)" } ?: ""}", fontSize = 12.sp)
+                    }
+                }
+            }
+            it["top_inhibitors_terminal"]?.jsonArray?.let { inhibitors ->
+                if (inhibitors.isNotEmpty()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Strongest opposing needs", fontWeight = FontWeight.SemiBold, fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.error)
+                    inhibitors.forEach { item ->
+                        val obj = item.jsonObject
+                        val need = obj["need"]?.jsonPrimitive?.contentOrNull ?: return@forEach
+                        val value = signedNumber(obj["signed_input"])
+                        Text("• ${prettyNeed(need)}${value?.let { "  ($it)" } ?: ""}", fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        xai["competition"]?.jsonObject?.let { competition ->
             Spacer(Modifier.height(10.dp))
+            Text("Competition", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            KvRow("Co-dominance fraction", decimalNumber(competition["co_dominance_fraction"]))
+            KvRow("Winner lead fraction", decimalNumber(competition["winner_lead_fraction"]))
+            KvRow("Mean top-two gap", decimalNumber(competition["mean_top2_gap"]))
+            KvRow("Minimum top-two gap", decimalNumber(competition["minimum_top2_gap"]))
         }
-        xai["key_drivers"]?.jsonArray?.let { arr ->
-            if (arr.isNotEmpty()) {
-                Text("Key drivers", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.primary)
-                arr.forEach { Text("• ${it.jsonPrimitive.content}", fontSize = 12.sp) }
-                Spacer(Modifier.height(8.dp))
+
+        xai["leadership"]?.jsonObject?.let { leadership ->
+            Spacer(Modifier.height(10.dp))
+            Text("Leadership trajectory", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            KvRow("First identifiable leader",
+                leadership["first_identifiable_leader"]?.jsonPrimitive?.contentOrNull?.let(::prettyMode))
+            KvRow("Final leader",
+                leadership["final_leader"]?.jsonPrimitive?.contentOrNull?.let(::prettyMode))
+            KvRow("Winner switches", leadership["winner_switch_count"]?.jsonPrimitive?.intOrNull?.toString())
+            KvRow("Final leader acquired (model time)",
+                leadership["final_leader_acquired_time_model_units"]?.jsonPrimitive?.doubleOrNull?.let { "%.2f".format(it) })
+        }
+
+        xai["patterns"]?.jsonArray?.let { patterns ->
+            if (patterns.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                Text("Detected simulation patterns", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                patterns.forEach { pattern ->
+                    Text("• ${prettyPattern(pattern.jsonPrimitive.content)}", fontSize = 12.sp)
+                }
             }
         }
-        xai["key_inhibitors"]?.jsonArray?.let { arr ->
-            if (arr.isNotEmpty()) {
-                Text("Key inhibitors", fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.error)
-                arr.forEach { Text("• ${it.jsonPrimitive.content}", fontSize = 12.sp) }
+
+        xai["interpretation_guardrails"]?.jsonArray?.let { notes ->
+            if (notes.isNotEmpty()) {
+                Spacer(Modifier.height(10.dp))
+                HorizontalDivider()
                 Spacer(Modifier.height(8.dp))
+                Text("Interpretation notes", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                notes.forEach { note ->
+                    Text("• ${note.jsonPrimitive.content}", fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
-        KvRow("Confidence level",
-            xai["confidence_level"]?.jsonPrimitive?.doubleOrNull?.let { "%.2f".format(it * 100) + "%" })
     }
 }
 
@@ -485,6 +536,30 @@ private fun prettyMode(key: String): String = when (key.lowercase()) {
     "walk" -> "Walking"
     else   -> key
 }
+
+private fun prettyNeed(key: String): String = when (key) {
+    "pro_env" -> "Protecting the environment"
+    "physical" -> "Staying active"
+    "privacy" -> "Personal space"
+    "autonomy" -> "Freedom and flexibility"
+    "cost" -> "Saving money"
+    "speed" -> "Speed and saving time"
+    "safety_accident" -> "Traffic safety"
+    "safety_crime" -> "Feeling safe"
+    "comfort" -> "Comfort"
+    "reliable" -> "Reliability"
+    "health_infection" -> "Health and hygiene"
+    else -> key
+}
+
+private fun prettyPattern(value: String): String =
+    value.lowercase().replace('_', ' ').replaceFirstChar { it.uppercase() }
+
+private fun decimalNumber(element: JsonElement?): String? =
+    element?.jsonPrimitive?.doubleOrNull?.let { "%.3f".format(it) }
+
+private fun signedNumber(element: JsonElement?): String? =
+    element?.jsonPrimitive?.doubleOrNull?.let { "%+.3f".format(it) }
 
 private fun renderJsonValue(e: JsonElement): String = when (e) {
     is JsonPrimitive -> {

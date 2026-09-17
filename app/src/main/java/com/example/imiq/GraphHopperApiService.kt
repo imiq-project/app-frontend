@@ -49,11 +49,17 @@ interface GraphHopperApi {
 
 object GraphHopperApiService {
     private const val BASE_URL = "https://imiq-app.et.uni-magdeburg.de/"
+    // Geometry is supplemental: ranked routes must never wait through a long
+    // map-provider outage. Individual mode requests already run in parallel.
+    private const val CONNECT_TIMEOUT_SECONDS = 8L
+    private const val READ_TIMEOUT_SECONDS = 12L
+    private const val CALL_TIMEOUT_SECONDS = 15L
 
     private val client: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
+            .connectTimeout(CONNECT_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .readTimeout(READ_TIMEOUT_SECONDS, TimeUnit.SECONDS)
+            .callTimeout(CALL_TIMEOUT_SECONDS, TimeUnit.SECONDS)
             .build()
     }
 

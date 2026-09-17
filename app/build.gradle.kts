@@ -4,7 +4,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
-    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.0" // ADD THIS LINE
+    id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
 }
 
 val localProperties = Properties().apply {
@@ -23,12 +23,36 @@ android {
         versionCode = 1
         versionName = "1.0"
 
-        buildConfigField("String", "OPENAI_API_KEY", "\"${localProperties.getProperty("OPENAI_API_KEY", "")}\"")
-        buildConfigField("String", "FIWARE_API_KEY", "\"${localProperties.getProperty("FIWARE_API_KEY", "")}\"")
-
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
             useSupportLibrary = true
+        }
+    }
+
+    flavorDimensions += "environment"
+    productFlavors {
+        create("localEmulator") {
+            dimension = "environment"
+            applicationIdSuffix = ".local.emulator"
+            versionNameSuffix = "-local-emulator"
+            buildConfigField("String", "DYCONET_BASE_URL", "\"http://10.0.2.2:8077\"")
+            buildConfigField("boolean", "LOCAL_CORE_MODE", "true")
+        }
+        create("localUsb") {
+            dimension = "environment"
+            applicationIdSuffix = ".local.usb"
+            versionNameSuffix = "-local-usb"
+            buildConfigField("String", "DYCONET_BASE_URL", "\"http://127.0.0.1:8077\"")
+            buildConfigField("boolean", "LOCAL_CORE_MODE", "true")
+        }
+        create("production") {
+            dimension = "environment"
+            buildConfigField(
+                "String",
+                "DYCONET_BASE_URL",
+                "\"https://imiq-app.et.uni-magdeburg.de\"",
+            )
+            buildConfigField("boolean", "LOCAL_CORE_MODE", "false")
         }
     }
 
@@ -53,7 +77,6 @@ android {
         compose = true
         buildConfig = true
     }
-    // Remove composeOptions when using the plugin
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

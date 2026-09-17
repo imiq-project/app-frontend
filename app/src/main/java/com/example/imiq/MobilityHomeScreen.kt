@@ -1,412 +1,87 @@
 package com.example.imiq
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material3.Icon
-import androidx.compose.material3.Text
-import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material.icons.filled.Place
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.text.TextStyle
-import kotlinx.coroutines.delay
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import java.time.LocalDateTime
+import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
+
+private data class QuickDestination(val place: MobilityReferenceData.Place)
 
 @Composable
-fun MobilityHomeScreen(
-    userProfile: ClassificationResult? = null,
-    userName: String = "",
-    onPlanTrip: (DemoRoutingData.Place) -> Unit = {},
-    onOpenProfile: () -> Unit = {},
-    onOpenSettings: () -> Unit = {}
-) {
-    val s = LocalStrings.current
-    val hour = remember { LocalDateTime.now().hour }
-    val greeting = when (hour) {
-        in 5..11 -> s.goodMorning
-        in 12..17 -> s.goodAfternoon
-        else -> s.goodEvening
-    }
-    val saved = listOf(
-        Triple(s.savedHome, "Stadtfeld Ost", Icons.Default.Home),
-        Triple(s.savedCampus, "Universitätsplatz", Icons.Default.School),
-        Triple("Hauptbahnhof", "Central Station", Icons.Default.Train)
-    )
-
-    var searching by remember { mutableStateOf(false) }
-
-    Box(Modifier.fillMaxSize().background(Mob.bg)) {
-
-        MobMap(
-            modifier = Modifier.fillMaxSize(),
-            center = MAGDEBURG,
-            zoom = 14.2,
-            interactive = true
-        )
-
-        // Top scrim for legibility
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(180.dp)
-                .background(Brush.verticalGradient(listOf(Mob.bg, Color.Transparent)))
-        )
-
-        // Top bar
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .statusBarsPadding()
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column(Modifier.weight(1f)) {
-                Text(greeting, color = Mob.textSecondary, fontSize = 13.sp)
-                Text(
-                    userName.takeIf { it.isNotBlank() }?.let { "$it 👋" } ?: s.whereHeaded,
-                    color = Mob.textPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold
-                )
-            }
-            RoundIconButton(Icons.Default.Settings, onOpenSettings)
-            Spacer(Modifier.width(10.dp))
-            ProfileAvatar(userName, onOpenProfile)
-        }
-
-        // Re-center FAB sits just above the sheet
-        RoundIconButton(
-            Icons.Default.MyLocation,
-            onClick = {},
-            modifier = Modifier
-                .align(Alignment.BottomEnd)
-                .padding(end = 20.dp, bottom = 320.dp)
-        )
-
-        // Bottom sheet
-        BottomSheet(
-            modifier = Modifier.align(Alignment.BottomCenter),
-            greeting = greeting,
-            saved = saved,
-            onSearch = { searching = true },
-            onPlanPlace = { idx -> onPlanTrip(DemoRoutingData.landmarks.getOrElse(idx) { DemoRoutingData.destination }) },
-            onPersonalize = onOpenProfile
-        )
-
-        // Destination search overlay (in-house geocoder, Magdeburg-bounded)
-        if (searching) {
-            BackHandler(enabled = true) { searching = false }
-            DestinationSearchOverlay(
-                onPick = { place ->
-                    searching = false
-                    onPlanTrip(place)
-                },
-                onClose = { searching = false }
-            )
-        }
+fun MobilityHomeScreen(userName: String = "", onPlanTrip: (MobilityReferenceData.Place) -> Unit = {}, onOpenProfile: () -> Unit = {}, onOpenSettings: () -> Unit = {}) {
+    val context = LocalContext.current; val scope = rememberCoroutineScope(); val de = LanguageState.current == AppLanguage.DE
+    val helper = remember { LocationHelper(context) }
+    val quick = remember { MobilityReferenceData.landmarks.take(3).map(::QuickDestination) }
+    var permitted by remember { mutableStateOf(hasAnyLocationPermission(context)) }
+    var measured by rememberSaveable { mutableStateOf<Pair<Double, Double>?>(null) }
+    var center by rememberSaveable { mutableStateOf(TripOriginStore.manualOrigin()?.let { it.lat to it.lon } ?: MAGDEBURG) }
+    var destination by rememberSaveable { mutableStateOf<MobilityReferenceData.Place?>(null) }
+    var searching by rememberSaveable { mutableStateOf(false) }; var selectingOrigin by rememberSaveable { mutableStateOf(false) }; var originChoice by rememberSaveable { mutableStateOf(false) }
+    var pending by remember { mutableStateOf<MobilityReferenceData.Place?>(null) }; var message by rememberSaveable { mutableStateOf<String?>(null) }; var locating by rememberSaveable { mutableStateOf(false) }
+    fun acquireLocation(continuePlan: Boolean = false) { locating = true; scope.launch { val point = helper.getMeasuredDeviceLocation(); locating = false; when {
+        point == null -> { message = if (de) "Der Standort ist nicht verfügbar. Wähle stattdessen einen Startpunkt." else "Your location is unavailable. Choose another starting point instead."; if (continuePlan) originChoice = true }
+        !RoutingCoveragePolicy.contains(point.first, point.second) -> { message = if (de) "Der aktuelle Standort liegt außerhalb des Routing-Gebiets." else "Your current location is outside the supported routing area."; if (continuePlan) originChoice = true }
+        else -> { TripOriginStore.clearManual(); measured = point; center = point; message = null; if (continuePlan) pending?.let { pending = null; onPlanTrip(it) } }
+    } } }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result -> permitted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true || result[Manifest.permission.ACCESS_COARSE_LOCATION] == true; if (permitted) acquireLocation(true) else { message = if (de) "Standortfreigabe wurde nicht erteilt. Du kannst einen Startpunkt wählen." else "Location permission was not granted. Choose another starting point instead."; originChoice = pending != null } }
+    fun requestLocation(continuePlan: Boolean = false) { if (permitted) acquireLocation(continuePlan) else permission.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION)) }
+    fun plan() { destination?.let { selected -> if (measured != null || TripOriginStore.manualOrigin() != null) onPlanTrip(selected) else { pending = selected; originChoice = true } } }
+    LaunchedEffect(permitted) { if (permitted && measured == null && TripOriginStore.manualOrigin() == null) acquireLocation() }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        val origin = measured ?: TripOriginStore.manualOrigin()?.let { it.lat to it.lon }
+        MobMap(Modifier.fillMaxSize(), center = center, currentLocation = origin, zoom = if (origin == null) 14.2 else 15.2)
+        HomeTopActions(onOpenSettings, onOpenProfile, userName)
+        IconButton({ measured?.let { center = it } ?: requestLocation() }, Modifier.align(Alignment.CenterEnd).padding(end = ImiqSpacing.md).size(48.dp).background(MaterialTheme.colorScheme.surfaceContainer, CircleShape)) { Icon(Icons.Default.MyLocation, if (de) "Standort zentrieren" else "Center location") }
+        TripPlannerSheet(Modifier.align(Alignment.BottomCenter), originLabel = when { measured != null -> if (de) "Aktueller Standort" else "Current location"; TripOriginStore.manualOrigin() != null -> TripOriginStore.manualOrigin()!!.label; else -> if (de) "Startpunkt wählen" else "Choose starting point" }, originAvailable = origin != null, locating, destination, message, quick, { originChoice = true }, { searching = true }, ::plan, { destination = it; center = it.lat to it.lon; message = if (origin == null) (if (de) "Ziel gewählt. Wähle jetzt einen Startpunkt." else "Destination selected. Choose a starting point.") else (if (de) "Ziel gewählt. Route planen ist bereit." else "Destination selected. Plan route is ready.") })
+        if (searching) PlaceSearchOverlay(if (de) "Ziel wählen" else "Choose destination", if (de) "Ziel in Magdeburg suchen" else "Search a destination in Magdeburg", { p -> destination = p; center = p.lat to p.lon; searching = false; message = null }, { searching = false })
+        if (selectingOrigin) PlaceSearchOverlay(if (de) "Startpunkt wählen" else "Choose starting point", if (de) "Startpunkt in Magdeburg suchen" else "Search a starting point in Magdeburg", { p -> if (RoutingCoveragePolicy.contains(p.lat, p.lon)) { TripOriginStore.setManual(p); measured = null; center = p.lat to p.lon; selectingOrigin = false; message = null; pending?.let { pending = null; onPlanTrip(it) } } else message = if (de) "Dieser Startpunkt liegt außerhalb des Routing-Gebiets." else "This starting point is outside the supported routing area." }, { selectingOrigin = false }, false)
+        if (originChoice) OriginChoiceOverlay({ originChoice = false; requestLocation(true) }, { originChoice = false; selectingOrigin = true }, { originChoice = false; pending = null })
     }
 }
 
-@Composable
-private fun BottomSheet(
-    modifier: Modifier,
-    greeting: String,
-    saved: List<Triple<String, String, ImageVector>>,
-    onSearch: () -> Unit,
-    onPlanPlace: (Int) -> Unit,
-    onPersonalize: () -> Unit
-) {
-    val s = LocalStrings.current
-    Column(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .background(Mob.surface)
-            .border(
-                1.dp, Mob.border,
-                RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
-            )
-            .navigationBarsPadding()
-            .padding(horizontal = 20.dp)
-            .padding(top = 12.dp, bottom = 20.dp)
-    ) {
-        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { SheetHandle() }
-        Spacer(Modifier.height(16.dp))
-
-        // "Where to?" hero field
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
-                .background(Mob.surfaceHi)
-                .border(1.dp, Mob.borderHi, RoundedCornerShape(16.dp))
-                .clickable { onSearch() }
-                .padding(horizontal = 16.dp, vertical = 16.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.Search, null, tint = Mob.primary, modifier = Modifier.size(22.dp))
-            Spacer(Modifier.width(12.dp))
-            Text(s.whereTo, color = Mob.textSecondary, fontSize = 17.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.weight(1f))
-            Box(
-                Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(Mob.primary.copy(alpha = 0.16f))
-                    .padding(horizontal = 8.dp, vertical = 5.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.AutoAwesome, null, tint = Mob.primary, modifier = Modifier.size(13.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(s.smart, color = Mob.primary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-        }
-
-        Spacer(Modifier.height(18.dp))
-        MobSectionLabel(s.savedRecent)
-        Spacer(Modifier.height(6.dp))
-
-        saved.forEachIndexed { i, (label, sub, icon) ->
-            SavedPlaceRow(label, sub, icon) { onPlanPlace(i) }
-            if (i < saved.lastIndex) {
-                Box(Modifier.fillMaxWidth().height(1.dp).background(Mob.border))
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        // Personalization footer
-        Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(Mob.primary.copy(alpha = 0.08f))
-                .border(1.dp, Mob.primary.copy(alpha = 0.22f), RoundedCornerShape(14.dp))
-                .clickable { onPersonalize() }
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(Icons.Default.AutoAwesome, null, tint = Mob.primary, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Text(s.personalizedRouting, color = Mob.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                Text(s.rankedByPassport, color = Mob.textSecondary, fontSize = 12.sp)
-            }
-            Icon(Icons.Default.ChevronRight, null, tint = Mob.textMuted, modifier = Modifier.size(20.dp))
-        }
-    }
+@Composable private fun HomeTopActions(onSettings: () -> Unit, onProfile: () -> Unit, userName: String) = Row(Modifier.fillMaxWidth().statusBarsPadding().padding(ImiqSpacing.md), horizontalArrangement = Arrangement.End) {
+    IconButton(onSettings, Modifier.size(48.dp).background(MaterialTheme.colorScheme.surfaceContainer, CircleShape)) { Icon(Icons.Default.Settings, "Settings") }
+    Spacer(Modifier.width(ImiqSpacing.xs)); FilledTonalButton(onProfile, Modifier.heightIn(min = 48.dp)) { Icon(Icons.Default.Place, null); Spacer(Modifier.width(ImiqSpacing.xxs)); Text(if (userName.isBlank()) "Cognitive Passport" else userName, style = MaterialTheme.typography.labelLarge) }
 }
 
-@Composable
-private fun SavedPlaceRow(label: String, sub: String, icon: ImageVector, onClick: () -> Unit) {
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .clickable { onClick() }
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier.size(40.dp).clip(CircleShape).background(Mob.surfaceHi),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(icon, null, tint = Mob.textSecondary, modifier = Modifier.size(20.dp))
-        }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(label, color = Mob.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(sub, color = Mob.textMuted, fontSize = 12.sp)
-        }
-        Icon(Icons.Default.NorthEast, null, tint = Mob.textMuted, modifier = Modifier.size(18.dp))
-    }
+@Composable private fun TripPlannerSheet(modifier: Modifier, originLabel: String, originAvailable: Boolean, locating: Boolean, destination: MobilityReferenceData.Place?, message: String?, quick: List<QuickDestination>, chooseOrigin: () -> Unit, chooseDestination: () -> Unit, plan: () -> Unit, chooseQuick: (MobilityReferenceData.Place) -> Unit) {
+    val de = LanguageState.current == AppLanguage.DE
+    Surface(modifier.fillMaxWidth(), shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainer, tonalElevation = 3.dp) { Column(Modifier.navigationBarsPadding().padding(horizontal = ImiqSpacing.md, vertical = ImiqSpacing.sm)) {
+        SectionHeader(if (de) "Route planen" else "Plan a route"); Spacer(Modifier.height(ImiqSpacing.sm))
+        TripLocationRow(if (de) "Von" else "From", if (locating) (if (de) "Standort wird ermittelt…" else "Getting location…") else originLabel, Icons.Default.MyLocation, chooseOrigin)
+        Spacer(Modifier.height(ImiqSpacing.xs)); TripLocationRow(if (de) "Nach" else "To", destination?.label ?: if (de) "Ziel wählen" else "Choose destination", Icons.Default.Place, chooseDestination)
+        message?.let { Spacer(Modifier.height(ImiqSpacing.sm)); InlineErrorState(it, severity = InlineErrorSeverity.Warning) }; Spacer(Modifier.height(ImiqSpacing.sm))
+        PrimaryActionButton(if (de) "Route planen" else "Plan route", plan, Modifier.fillMaxWidth(), enabled = destination != null && originAvailable && !locating)
+        Spacer(Modifier.height(ImiqSpacing.sm)); Text(if (de) "Schnellziele" else "Quick destinations", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(ImiqSpacing.xs)) { quick.forEach { item -> val selected = destination?.lat == item.place.lat && destination?.lon == item.place.lon; AssistChip(onClick = { chooseQuick(item.place) }, label = { Text(if (selected) "✓ ${item.place.label}" else item.place.label, style = MaterialTheme.typography.labelMedium) }, modifier = Modifier.heightIn(min = 48.dp).semantics { stateDescription = if (selected) "Selected destination" else "Destination option" }) } }
+    } }
 }
 
-@Composable
-private fun ProfileAvatar(userName: String, onClick: () -> Unit) {
-    val initial = userName.trim().firstOrNull()?.uppercase() ?: "Y"
-    Box(
-        Modifier
-            .size(42.dp)
-            .clip(CircleShape)
-            .background(Mob.brandGradient)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Text(initial, color = Mob.onPrimary, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-    }
-}
+@Composable private fun TripLocationRow(label: String, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -> Unit) = ListItem(
+    headlineContent = { Text(value, style = MaterialTheme.typography.bodyLarge) }, overlineContent = { Text(label, style = MaterialTheme.typography.labelMedium) }, leadingContent = { Icon(icon, null) }, trailingContent = { Icon(Icons.AutoMirrored.Filled.ArrowForward, "Change $label") }, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp).clickable(role = Role.Button, onClick = onClick).semantics { stateDescription = "$label: $value" }, colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .45f)))
 
-@Composable
-private fun RoundIconButton(icon: ImageVector, onClick: () -> Unit, modifier: Modifier = Modifier) {
-    Box(
-        modifier
-            .size(42.dp)
-            .clip(CircleShape)
-            .background(Mob.glass)
-            .border(1.dp, Mob.border, CircleShape)
-            .clickable { onClick() },
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(icon, null, tint = Mob.textPrimary, modifier = Modifier.size(20.dp))
-    }
-}
+@Composable private fun OriginChoiceOverlay(onUse: () -> Unit, onManual: () -> Unit, onCancel: () -> Unit) { val de = LanguageState.current == AppLanguage.DE; AlertDialog(onDismissRequest = onCancel, title = { Text(if (de) "Startpunkt auswählen" else "Choose starting point") }, text = { Text(if (de) "Verwende deinen aktuellen Standort oder wähle einen anderen Startpunkt." else "Use your current location or choose another starting point.") }, confirmButton = { PrimaryActionButton(if (de) "Aktuellen Standort verwenden" else "Use my current location", onUse, icon = Icons.Default.MyLocation) }, dismissButton = { AlternativeActionButton(if (de) "Anderen Startpunkt wählen" else "Choose another starting point", onManual) }) }
 
-// ---------------------------------------------------------------------------
-// Destination search: debounced lookup against the in-house geocode service
-// (Magdeburg-bounded + cached in GeocodingApiService). Resolves typed text ->
-// {lat, lon} and hands a real Place back via onPick. Falls back to curated
-// landmarks while the box is empty. The geocoder matches complete words only
-// (no prefix search), so results appear once a word is finished.
-// ---------------------------------------------------------------------------
-@Composable
-private fun DestinationSearchOverlay(
-    onPick: (DemoRoutingData.Place) -> Unit,
-    onClose: () -> Unit
-) {
-    val s = LocalStrings.current
-    var query by remember { mutableStateOf("") }
-    var results by remember { mutableStateOf<List<GeoResult>>(emptyList()) }
-    var loading by remember { mutableStateOf(false) }
-    val focus = remember { FocusRequester() }
-
-    // Debounced search: fire 500 ms after the user stops typing (the geocoder
-    // resolves complete words, so waiting for a pause avoids dead mid-word calls).
-    LaunchedEffect(query) {
-        val q = query.trim()
-        if (q.length < 2) {
-            results = emptyList(); loading = false
-            return@LaunchedEffect
-        }
-        loading = true
-        delay(500)
-        results = GeocodingApiService.search(q)
-        loading = false
-    }
-    LaunchedEffect(Unit) { focus.requestFocus() }
-
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Mob.bg)
-            .statusBarsPadding()
-            .padding(horizontal = 16.dp)
-    ) {
-        // Search bar
-        Row(
-            Modifier.fillMaxWidth().padding(vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                Modifier.size(42.dp).clip(CircleShape).background(Mob.glass)
-                    .border(1.dp, Mob.border, CircleShape).clickable { onClose() },
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = Mob.textPrimary, modifier = Modifier.size(20.dp))
-            }
-            Spacer(Modifier.width(12.dp))
-            Row(
-                Modifier.weight(1f).clip(RoundedCornerShape(14.dp)).background(Mob.surfaceHi)
-                    .border(1.dp, Mob.borderHi, RoundedCornerShape(14.dp))
-                    .padding(horizontal = 14.dp, vertical = 13.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Default.Search, null, tint = Mob.primary, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(10.dp))
-                Box(Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-                    if (query.isEmpty()) {
-                        Text(s.searchPlaceMd, color = Mob.textMuted, fontSize = 15.sp)
-                    }
-                    BasicTextField(
-                        value = query,
-                        onValueChange = { query = it },
-                        singleLine = true,
-                        textStyle = TextStyle(color = Mob.textPrimary, fontSize = 15.sp),
-                        cursorBrush = SolidColor(Mob.primary),
-                        modifier = Modifier.fillMaxWidth().focusRequester(focus)
-                    )
-                }
-                if (query.isNotEmpty()) {
-                    Icon(
-                        Icons.Default.Close, "Clear", tint = Mob.textMuted,
-                        modifier = Modifier.size(18.dp).clickable { query = "" }
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(4.dp))
-
-        Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
-            val q = query.trim()
-            when {
-                q.length < 2 -> {
-                    MobSectionLabel(s.popularInMd)
-                    Spacer(Modifier.height(6.dp))
-                    DemoRoutingData.landmarks.forEach { place ->
-                        PlaceResultRow(place.label, place.sub) { onPick(place) }
-                    }
-                }
-                loading -> Text(
-                    s.searching, color = Mob.textSecondary, fontSize = 13.sp,
-                    modifier = Modifier.padding(vertical = 16.dp)
-                )
-                results.isEmpty() -> Text(
-                    String.format(s.noPlacesFound, q), color = Mob.textMuted, fontSize = 13.sp,
-                    modifier = Modifier.padding(vertical = 16.dp)
-                )
-                else -> results.forEach { r ->
-                    PlaceResultRow(r.label, r.sub) {
-                        onPick(DemoRoutingData.Place(label = r.label, sub = r.sub, lat = r.lat, lon = r.lon))
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun PlaceResultRow(label: String, sub: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable { onClick() }.padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(
-            Modifier.size(40.dp).clip(CircleShape).background(Mob.surfaceHi),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(Icons.Default.Place, null, tint = Mob.primary, modifier = Modifier.size(20.dp))
-        }
-        Spacer(Modifier.width(14.dp))
-        Column(Modifier.weight(1f)) {
-            Text(label, color = Mob.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(sub, color = Mob.textMuted, fontSize = 12.sp)
-        }
-        Icon(Icons.Default.NorthEast, null, tint = Mob.textMuted, modifier = Modifier.size(18.dp))
-    }
-}
-
-@Preview(showBackground = true, backgroundColor = 0xFF07090D, heightDp = 780)
-@Composable
-private fun MobilityHomePreview() {
-    MobilityHomeScreen(userName = "Deniz")
-}
+private fun hasAnyLocationPermission(context: Context): Boolean = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED || ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED

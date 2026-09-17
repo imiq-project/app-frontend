@@ -39,12 +39,12 @@ class LoginViewModel(
                 } else {
                     val error = result.exceptionOrNull()
                     _loginState.value = LoginState.Error(
-                        error?.message ?: "Login failed. Please check your code."
+                        "We couldn't sign you in. Please check your code and try again."
                     )
                 }
             } catch (e: Exception) {
                 _loginState.value = LoginState.Error(
-                    "Network error: ${e.message}"
+                    "We couldn't sign you in. Please try again."
                 )
             }
         }

@@ -4,80 +4,142 @@ import com.google.gson.Gson
 import com.google.gson.JsonObject
 
 /**
- * Adapts a DYCONET `baseline_1.0` passport (11 needs) into the OLD 9-dimension
- * shape the DEPLOYED routing engine still expects. Verified live 2026-06-04:
- * /api/routing/ranked-routes reads top-level id / values{9} / beliefs{3}; the
- * 11-need build (commit 2e2fc77) is committed but not deployed, so sending the
- * raw baseline_1.0 passport yields all-zero scores and a foot-only result.
+ * Adapts Cognitive Passport v2 to the 11-need routing contract without adding
+ * values that were not reported by the user.
  *
- * The mapping is lossy by necessity:
- *  - safety_accident + safety_crime collapse into one `safety` (the old single dim);
- *  - `reliable` and `health_infection` have no 9-dim slot and are dropped;
- *  - the old `hedonism` NEED has no 11-need source, so we borrow the `hedonic`
- *    value orientation as the closest available signal.
- * Beliefs are inferred from routing_parameters.mode_weights (>0.01 => owns/has),
- * mirroring the engine's own 11-need inference rule.
+ * Availability comes from the questionnaire's explicit binary responses. It
+ * is never inferred from comparative mode weights or past-use frequency.
  */
 object PassportAdapter {
     private val gson = Gson()
 
-    private const val MODE_WEIGHT_THRESHOLD = 0.01
+    private val requiredNeeds = listOf(
+        "pro_env",
+        "physical",
+        "privacy",
+        "autonomy",
+        "cost",
+        "speed",
+        "safety_accident",
+        "safety_crime",
+        "comfort",
+        "reliable",
+        "health_infection",
+    )
 
-    /**
-     * Builds the engine `cognitive_passport` request field from the stored passport
-     * JSON (as returned by [PassportStore.load]). Returns the unwrapped 9-dim object
-     * `{ id, values{9}, beliefs{3} }` that the deployed engine reads directly.
-     */
-    fun toEnginePassport(storedJson: String): JsonObject {
+    private val requiredModes = listOf("car", "bike", "pt", "walk")
+    private val supportedPassportSchemas = setOf("2.0", "2.1")
+    private val environmentalToleranceKeys = listOf(
+        "rain", "crowding", "darkness", "traffic", "temperature",
+    )
+
+    /** Read the optional tolerance contract without altering the routing payload. */
+    fun environmentalTolerances(storedJson: String): Map<String, Double?> {
         val root = gson.fromJson(storedJson, JsonObject::class.java)
-        // PassportStore holds {"cognitive_passport": {...}}; unwrap one level if present.
         val cp = if (root.has("cognitive_passport") && root.get("cognitive_passport").isJsonObject)
             root.getAsJsonObject("cognitive_passport") else root
-
-        val profile = cp.getAsJsonObjectOrNull("profile")
-        val needs = profile?.getAsJsonObjectOrNull("needs") ?: JsonObject()
-        val values = profile?.getAsJsonObjectOrNull("values") ?: JsonObject()
-        val weights = cp.getAsJsonObjectOrNull("routing_parameters")
-            ?.getAsJsonObjectOrNull("mode_weights") ?: JsonObject()
-
-        fun need(key: String, default: Double = 0.0) = needs.numberOr(key, default)
-        fun value(key: String, default: Double = 0.5) = values.numberOr(key, default)
-        fun weight(key: String) = weights.numberOr(key, 0.0)
-
-        val nineValues = JsonObject().apply {
-            addProperty("pro_environment", need("pro_env"))
-            addProperty("physical_activity", need("physical"))
-            addProperty("privacy", need("privacy"))
-            addProperty("autonomy", need("autonomy"))
-            addProperty("hedonism", value("hedonic"))                       // no 11-need source
-            addProperty("cost_saving", need("cost"))
-            addProperty("speed", need("speed"))
-            addProperty("safety", (need("safety_accident") + need("safety_crime")) / 2.0)
-            addProperty("comfort", need("comfort"))
-        }
-
-        val beliefs = JsonObject().apply {
-            addProperty("owns_car", weight("car") > MODE_WEIGHT_THRESHOLD)
-            addProperty("owns_bike", weight("bike") > MODE_WEIGHT_THRESHOLD)
-            addProperty("has_pt_access", weight("pt") > MODE_WEIGHT_THRESHOLD)
-        }
-
-        val id = cp.stringOrNull("agent_id") ?: cp.stringOrNull("id") ?: "app-user"
-
-        return JsonObject().apply {
-            addProperty("id", id)
-            add("values", nineValues)
-            add("beliefs", beliefs)
+        val profile = cp.get("profile")?.takeIf { it.isJsonObject }?.asJsonObject
+        val tolerances = profile?.get("environmental_tolerances")
+            ?.takeIf { it.isJsonObject }?.asJsonObject
+        return environmentalToleranceKeys.associateWith { key ->
+            val element = tolerances?.get(key)
+            if (element == null || element.isJsonNull) null else {
+                val value = runCatching { element.asDouble }.getOrElse {
+                    throw IllegalArgumentException("Environmental tolerance '$key' is not numeric.")
+                }
+                require(value.isFinite() && value in 0.0..1.0) {
+                    "Environmental tolerance '$key' is outside [0,1]."
+                }
+                value
+            }
         }
     }
 
-    private fun JsonObject.getAsJsonObjectOrNull(key: String): JsonObject? =
-        if (has(key) && get(key).isJsonObject) getAsJsonObject(key) else null
+    /** Returns `{id, values{11}, beliefs{3}, availability{4}, mode_weights{4}}`. */
+    fun toEnginePassport(storedJson: String): JsonObject {
+        val root = gson.fromJson(storedJson, JsonObject::class.java)
+        val cp = if (root.has("cognitive_passport") && root.get("cognitive_passport").isJsonObject)
+            root.getAsJsonObject("cognitive_passport") else root
 
-    private fun JsonObject.numberOr(key: String, default: Double): Double =
-        if (has(key) && !get(key).isJsonNull) {
-            runCatching { get(key).asDouble }.getOrDefault(default)
-        } else default
+        val schemaVersion = cp.stringOrNull("schema_version")
+        require(schemaVersion in supportedPassportSchemas) {
+            "Routing requires a supported Cognitive Passport v2 schema (2.0 or 2.1)."
+        }
+        val provenance = cp.requiredObject("input_provenance")
+        require(provenance.stringOrNull("policy") == "current_user_responses_only") {
+            "Routing requires current-user-only input provenance."
+        }
+        require(!provenance.requiredBoolean("imputation_used")) {
+            "Routing rejects passports that used missing-value substitution."
+        }
+        require(!provenance.requiredBoolean("population_or_synthetic_values_used")) {
+            "Routing rejects passports that used population or synthetic values."
+        }
+        val observedCounts = provenance.requiredObject("observed_counts")
+        require(
+            observedCounts.requiredNumber("needs") == 11.0 &&
+                observedCounts.requiredNumber("beliefs") == 44.0 &&
+                observedCounts.requiredNumber("valences") == 4.0 &&
+                observedCounts.requiredNumber("availability") == 4.0
+        ) { "Routing requires all 63 observed questionnaire inputs." }
+        val profile = cp.requiredObject("profile")
+        val needs = profile.requiredObject("needs")
+        val availability = profile.requiredObject("availability")
+        val routing = cp.requiredObject("routing_parameters")
+        val modeWeights = routing.requiredObject("mode_weights")
+
+        val elevenValues = JsonObject().apply {
+            requiredNeeds.forEach { key ->
+                val value = needs.requiredNumber(key)
+                require(value in 0.0..1.0) { "Cognitive Passport need '$key' is outside [0,1]." }
+                addProperty(key, value)
+            }
+        }
+        val availabilityOut = JsonObject().apply {
+            requiredModes.forEach { key -> addProperty(key, availability.requiredBoolean(key)) }
+        }
+        val weightsOut = JsonObject().apply {
+            requiredModes.forEach { key ->
+                val value = modeWeights.requiredNumber(key)
+                require(value in 0.0..1.0) { "Cognitive Passport mode weight '$key' is outside [0,1]." }
+                addProperty(key, value)
+            }
+        }
+
+        val beliefs = JsonObject().apply {
+            addProperty("owns_car", availability.requiredBoolean("car"))
+            addProperty("owns_bike", availability.requiredBoolean("bike"))
+            addProperty("has_pt_access", availability.requiredBoolean("pt"))
+        }
+
+        val id = cp.stringOrNull("agent_id")
+            ?: error("Cognitive Passport v2 is missing agent_id.")
+
+        return JsonObject().apply {
+            addProperty("id", id)
+            add("values", elevenValues)
+            add("beliefs", beliefs)
+            add("availability", availabilityOut)
+            add("mode_weights", weightsOut)
+        }
+    }
+
+    private fun JsonObject.requiredObject(key: String): JsonObject {
+        require(has(key) && get(key).isJsonObject) { "Cognitive Passport is missing object '$key'." }
+        return getAsJsonObject(key)
+    }
+
+    private fun JsonObject.requiredNumber(key: String): Double {
+        require(has(key) && !get(key).isJsonNull) { "Cognitive Passport is missing '$key'." }
+        return runCatching { get(key).asDouble }
+            .getOrElse { throw IllegalArgumentException("Cognitive Passport field '$key' is not numeric.") }
+    }
+
+    private fun JsonObject.requiredBoolean(key: String): Boolean {
+        require(has(key) && !get(key).isJsonNull) { "Cognitive Passport is missing '$key'." }
+        return runCatching { get(key).asBoolean }
+            .getOrElse { throw IllegalArgumentException("Cognitive Passport field '$key' is not boolean.") }
+    }
 
     private fun JsonObject.stringOrNull(key: String): String? =
         if (has(key) && !get(key).isJsonNull) runCatching { get(key).asString }.getOrNull() else null

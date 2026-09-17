@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -30,9 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 /**
- * Fresh 2026 smart-mobility design language — deep dark canvas, teal signature
- * accent, glass surfaces, generous radii. Independent of the old
- * FuturisticComponents / weather-mood theme.
+ * Legacy compatibility palette. New shared components use MaterialTheme as the
+ * source of truth; this object remains only while existing screens migrate.
  */
 object Mob {
     val bg = Color(0xFF07090D)
@@ -73,14 +73,7 @@ fun MobBackground(content: @Composable BoxScope.() -> Unit) {
     Box(
         Modifier
             .fillMaxSize()
-            .background(Mob.bg)
-            .background(
-                Brush.radialGradient(
-                    colors = listOf(Mob.primary.copy(alpha = 0.10f), Color.Transparent),
-                    center = Offset(180f, 120f),
-                    radius = 900f
-                )
-            ),
+            .background(MaterialTheme.colorScheme.background),
         content = content
     )
 }
@@ -89,16 +82,17 @@ fun MobBackground(content: @Composable BoxScope.() -> Unit) {
 fun MobGlassCard(
     modifier: Modifier = Modifier,
     color: Color = Mob.surface,
-    radius: Dp = 22.dp,
-    border: Color = Mob.border,
-    padding: Dp = 18.dp,
+    radius: Dp = 16.dp,
+    border: Color = Color.Transparent,
+    padding: Dp = 16.dp,
     content: @Composable ColumnScope.() -> Unit
 ) {
+    val container = if (color == Mob.surface) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f) else color
     Column(
         modifier
             .clip(RoundedCornerShape(radius))
-            .background(color)
-            .border(1.dp, border, RoundedCornerShape(radius))
+            .background(container)
+            .then(if (border != Color.Transparent) Modifier.border(1.dp, border, RoundedCornerShape(radius)) else Modifier)
             .padding(padding),
         content = content
     )
@@ -113,28 +107,7 @@ fun MobButton(
     color: Color = Mob.primary,
     enabled: Boolean = true
 ) {
-    Row(
-        modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (enabled) color else Mob.surfaceHi)
-            .clickable(enabled = enabled) { onClick() }
-            .padding(vertical = 17.dp),
-        horizontalArrangement = Arrangement.Center,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (leadingIcon != null) {
-            Icon(leadingIcon, null, tint = Mob.onPrimary, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-        }
-        Text(
-            text,
-            color = if (enabled) Mob.onPrimary else Mob.textMuted,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 0.5.sp
-        )
-    }
+    PrimaryActionButton(text, onClick, modifier.fillMaxWidth(), enabled, leadingIcon)
 }
 
 /** Animated circular match-score gauge with the percentage in the center. */
@@ -173,9 +146,8 @@ fun ScoreRing(
         }
         Text(
             "${(anim * 100).toInt()}",
-            color = Mob.textPrimary,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.Bold
+            color = MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelLarge,
         )
     }
 }
@@ -195,10 +167,8 @@ fun SheetHandle(modifier: Modifier = Modifier) {
 fun MobSectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text,
-        color = Mob.textMuted,
-        fontSize = 11.sp,
-        fontWeight = FontWeight.Bold,
-        letterSpacing = 1.5.sp,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.labelMedium,
         modifier = modifier
     )
 }

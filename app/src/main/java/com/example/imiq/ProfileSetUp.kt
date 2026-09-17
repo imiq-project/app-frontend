@@ -39,14 +39,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.*
 
 // =====================================================================
 //  DYCONET Cognitive Passport Questionnaire
-//  Replaces the old chat-style profile setup. Collects survey answers
-//  matching the LimeSurvey schema, POSTs to the Spark backend, and
-//  saves the returned cognitive passport on the device.
+//  Phase 1 availability architecture:
+//  - every HOTCO-CT input is an explicit current-user response;
+//  - availability is asked before mode representations and becomes q;
+//  - mode-use frequency is not collected or sent to HOTCO-CT;
+//  - unavailable modes are still rated for beliefs/valence so their latent
+//    representation is measured, while q keeps them inactive in this run.
 // =====================================================================
 
 private data class NeedSpec(val key: String, val label: String, val help: String)
@@ -66,15 +68,49 @@ private val NEEDS = listOf(
     NeedSpec("env",              "Eco-friendliness",   "Low CO2 emissions, climate protection, clean air"),
 )
 
-// v1 (boss decision 2026-06-05): only 4 aggregated modes. These keys are the
-// DYCONET parser's canonical JSON keys, so the SAME key works for frequencies
-// (s1_/s2_), valences (emoval) AND beliefs.
+// Phase 1 keeps the current four HOTCO actions fixed. Later availability
+// providers can expose additional services without changing this questionnaire
+// contract until the HOTCO topology itself is deliberately extended.
 private val MODES = listOf(
     ModeSpec("walk", "Walking", "🚶"),
     ModeSpec("bike", "Bicycle / E-Bike", "🚴"),
     ModeSpec("pt",   "Public Transport (Bus / Tram)", "🚌"),
     ModeSpec("car",  "Car (Driver)", "🚗"),
 )
+
+internal val ENVIRONMENTAL_TOLERANCE_KEYS = listOf(
+    "rain", "crowding", "darkness", "traffic", "temperature",
+)
+
+private fun phase1WelcomeBody(): String = when (LanguageState.current) {
+    AppLanguage.DE -> "Ein Fragebogen in sechs Teilen erfasst die aktuellen Eingaben für HOTCO-CT. Verfügbarkeit und Umweltverträglichkeit werden ausdrücklich von dir angegeben; Nutzungshäufigkeit wird weder erhoben noch als Ersatz für Verfügbarkeit oder Präferenz verwendet."
+    AppLanguage.EN -> "A six-part questionnaire collects the current inputs for HOTCO-CT. Availability and environmental tolerance are declared explicitly by you; mode-use frequency is neither collected nor used as a proxy for availability or preference."
+}
+
+private fun phase1AvailabilityIntro(): String = when (LanguageState.current) {
+    AppLanguage.DE -> "Auf welche Verkehrsmittel hast du im Alltag derzeit tatsächlich Zugriff?"
+    AppLanguage.EN -> "Which transport modes do you currently have access to in everyday life?"
+}
+
+private fun phase1AvailabilityHint(): String = when (LanguageState.current) {
+    AppLanguage.DE -> "Gib strukturellen Zugang an, nicht ob ein Verkehrsmittel für einen einzelnen Weg gerade bequem ist. Diese Antworten werden als binäre HOTCO-CT-Aktionsgates verwendet; Wetter, Distanz und Routing kommen erst in einer späteren Kontextschicht hinzu."
+    AppLanguage.EN -> "Report structural access, not whether a mode is convenient for one specific trip. These answers become binary HOTCO-CT action gates; weather, distance, and routing belong to a later context layer."
+}
+
+private fun unavailableMeasurementNote(): String = when (LanguageState.current) {
+    AppLanguage.DE -> "Dieses Verkehrsmittel ist für die aktuelle Simulation deaktiviert. Die folgenden Antworten erfassen nur deine Vorstellung davon und aktivieren es nicht."
+    AppLanguage.EN -> "This mode is gated out of the current simulation. The following answers only measure your representation of it and do not make it available."
+}
+
+private fun phase1BeliefsIntro(s: Strings): String = s.beliefsIntro + when (LanguageState.current) {
+    AppLanguage.DE -> " Auch nicht verfügbare Verkehrsmittel werden bewertet, damit Überzeugungen und Zugang getrennt bleiben."
+    AppLanguage.EN -> " Unavailable modes are still rated so beliefs remain separate from access."
+}
+
+private fun phase1ValenceIntro(s: Strings): String = s.emovalIntro + when (LanguageState.current) {
+    AppLanguage.DE -> " Bewerte auch nicht verfügbare Verkehrsmittel; die Valenz beschreibt deine Bewertung, nicht deinen aktuellen Zugang."
+    AppLanguage.EN -> " Rate unavailable modes too; valence describes your evaluation, not your current access."
+}
 
 // =====================================================================
 //  Main composable — multi-step orchestrator
@@ -83,43 +119,28 @@ private val MODES = listOf(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileSetupScreen(
-    onProfileComplete: (ClassificationResult) -> Unit,
+    onProfileComplete: () -> Unit,
     onBackClick: () -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     val s = LocalStrings.current
 
-    // -- Internal step state --
     var step by remember { mutableStateOf(0) }
-    val totalSteps = 5
+    val totalSteps = 6
+    var participantId by remember { mutableStateOf("") }
 
-    // -- Answer state --
-    val needsAnswers = remember {
-        mutableStateMapOf<String, Float>().apply { NEEDS.forEach { put(it.key, 4f) } }
-    }
-    val topPriorities = remember { mutableStateListOf<String>() }  // ordered list of need keys, max 3
-    val frequencies = remember {
-        mutableStateMapOf<String, Float>().apply { MODES.forEach { put(it.key, 1f) } }
-    }
-    val valences = remember {
-        mutableStateMapOf<String, Float>().apply { MODES.forEach { put(it.key, 4f) } }
-    }
-    val valencesNA = remember {
-        mutableStateMapOf<String, Boolean>().apply { MODES.forEach { put(it.key, false) } }
-    }
-    // beliefs[modeKey][needKey] = rating 1..7 (only the user's Top-3 needs are asked).
-    // beliefsNA[modeKey] = "I never use / no opinion" → mode omitted, model imputes it.
+    // Empty maps are intentional: a neutral-looking UI position is not a user
+    // response. Every required model input must be explicitly selected.
+    val needsAnswers = remember { mutableStateMapOf<String, Float>() }
+    val topPriorities = remember { mutableStateListOf<String>() }
+    val availability = remember { mutableStateMapOf<String, Boolean>() }
+    val valences = remember { mutableStateMapOf<String, Float>() }
     val beliefs = remember { mutableStateMapOf<String, MutableMap<String, Float>>() }
-    val beliefsNA = remember {
-        mutableStateMapOf<String, Boolean>().apply { MODES.forEach { put(it.key, false) } }
-    }
+    val environmentalTolerances = remember { mutableStateMapOf<String, Int>() }
 
-    // -- Generation state --
     var generating by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
-    var passportSummary by remember { mutableStateOf<PassportSummary?>(null) }
     var aiPassportRead by remember { mutableStateOf<String?>(null) }
-    // True once the AI read has FINISHED (success or failure) — gates "Continue".
     var aiReady by remember { mutableStateOf(false) }
 
     fun goBackOrExit() {
@@ -130,59 +151,43 @@ fun ProfileSetupScreen(
         generating = true
         error = null
         aiReady = false
+
+        val participantIdSnapshot = participantId
+        val needsSnapshot = needsAnswers.toMap()
+        val topPrioritiesSnapshot = topPriorities.toList()
+        val availabilitySnapshot = availability.toMap()
+        val valencesSnapshot = valences.toMap()
+        val beliefsSnapshot = beliefs.mapValues { (_, ratings) -> ratings.toMap() }
+        val environmentalTolerancesSnapshot = environmentalTolerances.toMap()
+
         scope.launch {
             try {
                 val json = buildSurveyJson(
-                    needs = needsAnswers,
-                    top3 = topPriorities,
-                    frequencies = frequencies,
-                    valences = valences,
-                    valencesNA = valencesNA,
-                    beliefs = beliefs,
-                    beliefsNA = beliefsNA,
+                    participantId = participantIdSnapshot,
+                    needs = needsSnapshot,
+                    top3 = topPrioritiesSnapshot,
+                    valences = valencesSnapshot,
+                    beliefs = beliefsSnapshot,
+                    availability = availabilitySnapshot,
+                    environmentalTolerances = environmentalTolerancesSnapshot,
                 )
                 val passport = PassportApiService.generatePassport(json)
-                PassportStore.save(passport)
-                passportSummary = summarizePassport(passport)
-                step = 7 // result screen
-                // gpt-5.4 reads the whole passport for the result screen. The result
-                // step blocks "Continue" until this finishes (aiReady). Capped at 20s
-                // so a slow/failed call never traps the user on this screen.
-                scope.launch {
-                    aiPassportRead = withTimeoutOrNull(20_000) {
-                        runCatching { RouteExplainerService.explainPassport(passport) }.getOrNull()
-                    }
-                    aiReady = true
+                require(isValidPassportV2(passport)) {
+                    "Server returned an invalid Cognitive Passport v2."
                 }
+                PassportStore.save(passport)
+                step = 8
+                // Passport creation is complete. LLM narration is a separate,
+                // server-side, user-triggered feature and is not part of setup.
+                aiReady = true
             } catch (e: Exception) {
-                error = e.message ?: "Could not reach the server"
+                error = if (LanguageState.current == AppLanguage.DE)
+                    "Der Cognitive Passport konnte nicht erstellt werden. Bitte versuche es erneut."
+                else "The Cognitive Passport couldn't be created. Please try again."
             } finally {
                 generating = false
             }
         }
-    }
-
-    // Offline fallback: if the DYCONET server is unreachable, complete onboarding
-    // with the bundled sample passport so the user is never hard-blocked. Uses the
-    // user's real slider answers for the local ProfileType derivation; only the
-    // generated cognitive passport is the bundled baseline_1.0 sample.
-    fun useOfflineTemplate() {
-        TokenManager.saveCognitivePassportFromTemplate()
-        val tpl = PassportStore.load()
-        passportSummary = tpl?.let { summarizePassport(it) }
-        aiReady = false
-        if (tpl != null) {
-            scope.launch {
-                aiPassportRead = withTimeoutOrNull(20_000) {
-                    runCatching { RouteExplainerService.explainPassport(tpl) }.getOrNull()
-                }
-                aiReady = true
-            }
-        } else {
-            aiReady = true
-        }
-        error = null
-        step = 7
     }
 
     Scaffold(
@@ -191,7 +196,7 @@ fun ProfileSetupScreen(
                 title = {
                     Column {
                         Text(stepTitleFor(s, step), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        if (step in 1..5) {
+                        if (step in 1..6) {
                             Text(
                                 String.format(s.stepXofY, step, totalSteps),
                                 fontSize = 11.sp,
@@ -210,31 +215,33 @@ fun ProfileSetupScreen(
         bottomBar = {
             BottomBar(
                 step = step,
-                canAdvance = canAdvance(step, needsAnswers, topPriorities),
+                canAdvance = canAdvance(
+                    step,
+                    participantId,
+                    needsAnswers,
+                    topPriorities,
+                    beliefs,
+                    valences,
+                    availability,
+                    environmentalTolerances,
+                ),
                 generating = generating,
                 aiReady = aiReady,
                 onBack = { goBackOrExit() },
                 onNext = {
-                    // Step 5 (mode feelings) is the last data-collection step.
-                    // Tapping "Generate passport" moves to the loading step
-                    // AND kicks off the network request.
-                    if (step == 5) {
-                        step = 6
+                    if (step == 6) {
+                        step = 7
                         submit()
                     } else {
                         step++
                     }
                 },
                 onFinish = {
-                    val classification = passportSummary?.let {
-                        derivedClassification(needsAnswers, it)
-                    } ?: fallbackClassification()
-                    // Mark profile as completed so the next app launch skips
-                    // setup and lands on main_menu directly.
-                    val name = TokenManager.getUserName() ?: ""
-                    val age = TokenManager.getUserAge() ?: ""
-                    TokenManager.saveUserProfile(name, age, classification.profileType.value)
-                    onProfileComplete(classification)
+                    check(PassportStore.hasPassport()) {
+                        "A validated HOTCO-CT passport is required before continuing."
+                    }
+                    TokenManager.markProfileCompleted(participantId.trim())
+                    onProfileComplete()
                 }
             )
         }
@@ -244,21 +251,25 @@ fun ProfileSetupScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            if (step in 1..5) {
+            if (step in 1..6) {
                 LinearProgressIndicator(
-                    progress = step / 5f,
+                    progress = step / 6f,
                     modifier = Modifier.fillMaxWidth()
                 )
             }
             when (step) {
-                0 -> WelcomeStep()
+                0 -> WelcomeStep(
+                    participantId = participantId,
+                    onParticipantIdChange = { participantId = it },
+                )
                 1 -> NeedsStep(needsAnswers)
                 2 -> TopPrioritiesStep(needsAnswers, topPriorities)
-                3 -> BeliefsStep(topPriorities, beliefs, beliefsNA)
-                4 -> FrequenciesStep(frequencies)
-                5 -> EmovalStep(valences, valencesNA)
-                6 -> GeneratingStep(generating = generating, error = error, onRetry = { submit() }, onOffline = { useOfflineTemplate() })
-                7 -> ResultStep(aiPassportRead, aiReady)
+                3 -> AvailabilityStep(availability)
+                4 -> BeliefsStep(beliefs, availability)
+                5 -> EmovalStep(valences, availability)
+                6 -> EnvironmentalToleranceStep(environmentalTolerances)
+                7 -> GeneratingStep(generating = generating, error = error, onRetry = { submit() })
+                8 -> ResultStep(aiPassportRead, aiReady)
             }
         }
     }
@@ -268,21 +279,52 @@ private fun stepTitleFor(s: Strings, step: Int): String = when (step) {
     0 -> s.stepWelcome
     1 -> s.stepNeeds
     2 -> s.stepPriorities
-    3 -> s.stepBeliefs
-    4 -> s.stepFrequencies
+    3 -> s.stepAvailability
+    4 -> s.stepBeliefs
     5 -> s.stepEmoval
-    6 -> s.stepGenerating
-    7 -> s.stepResult
+    6 -> s.stepEnvironmentalTolerance
+    7 -> s.stepGenerating
+    8 -> s.stepResult
     else -> ""
 }
 
 private fun canAdvance(
     step: Int,
+    participantId: String,
     needs: Map<String, Float>,
     top3: List<String>,
+    beliefs: Map<String, Map<String, Float>>,
+    valences: Map<String, Float>,
+    availability: Map<String, Boolean>,
+    environmentalTolerances: Map<String, Int>,
 ): Boolean = when (step) {
-    2 -> top3.size == 3  // must pick exactly 3
+    0 -> participantId.isNotBlank()
+    1 -> hasCompleteIntegerRatings(needs, NEEDS.map { it.key }, 1..7)
+    2 -> top3.size == 3 && top3.distinct().size == 3 &&
+        top3.all { key -> NEEDS.any { it.key == key } }
+    3 -> MODES.all { it.key in availability } &&
+        MODES.any { availability[it.key] == true }
+    4 -> MODES.all { mode ->
+        hasCompleteIntegerRatings(beliefs[mode.key].orEmpty(), NEEDS.map { it.key }, 1..7)
+    }
+    5 -> hasCompleteIntegerRatings(valences, MODES.map { it.key }, 1..7)
+    6 -> hasCompleteEnvironmentalToleranceRatings(environmentalTolerances)
     else -> true
+}
+
+internal fun hasCompleteEnvironmentalToleranceRatings(answers: Map<String, Int>): Boolean =
+    ENVIRONMENTAL_TOLERANCE_KEYS.all { answers[it] in 1..7 }
+
+private fun hasCompleteIntegerRatings(
+    answers: Map<String, Float>,
+    requiredKeys: Collection<String>,
+    range: IntRange,
+): Boolean = requiredKeys.all { key ->
+    val value = answers[key] ?: return@all false
+    value.isFinite() &&
+        value >= range.first.toFloat() &&
+        value <= range.last.toFloat() &&
+        value % 1f == 0f
 }
 
 // =====================================================================
@@ -290,7 +332,10 @@ private fun canAdvance(
 // =====================================================================
 
 @Composable
-private fun WelcomeStep() {
+private fun WelcomeStep(
+    participantId: String,
+    onParticipantIdChange: (String) -> Unit,
+) {
     val s = LocalStrings.current
     Column(
         modifier = Modifier
@@ -307,17 +352,27 @@ private fun WelcomeStep() {
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            s.welcomeBody,
+            phase1WelcomeBody(),
             fontSize = 15.sp,
             textAlign = TextAlign.Center,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Spacer(Modifier.height(22.dp))
+        OutlinedTextField(
+            value = participantId,
+            onValueChange = onParticipantIdChange,
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            label = { Text(s.participantId) },
+            supportingText = { Text(s.participantIdHint) },
+        )
         Spacer(Modifier.height(32.dp))
         InfoRow("1", s.welcomeInfo1)
         InfoRow("2", s.welcomeInfo2)
-        InfoRow("3", s.welcomeInfo3)
-        InfoRow("4", s.welcomeInfo4)
+        InfoRow("3", s.welcomeInfo6)
+        InfoRow("4", s.welcomeInfo3)
         InfoRow("5", s.welcomeInfo5)
+        InfoRow("6", s.stepEnvironmentalTolerance)
     }
 }
 
@@ -344,7 +399,7 @@ private fun InfoRow(num: String, text: String) {
 }
 
 // =====================================================================
-//  Step 1 — Needs (11 sliders, 1–7)
+//  Step 1 — Needs (11 explicit ratings, 1–7)
 // =====================================================================
 
 @Composable
@@ -369,19 +424,19 @@ private fun NeedsStep(answers: MutableMap<String, Float>) {
         )
         Spacer(Modifier.height(4.dp))
         NEEDS.forEach { need ->
-            NeedSliderCard(
+            NeedRatingCard(
                 label = s.needLabels[need.key] ?: need.label,
                 help = s.needHelps[need.key] ?: need.help,
-                value = answers[need.key] ?: 4f,
-                onChange = { answers[need.key] = it }
+                value = answers[need.key]?.toInt(),
+                onChange = { answers[need.key] = it.toFloat() }
             )
         }
-        Spacer(Modifier.height(80.dp))  // leave room above bottom bar
+        Spacer(Modifier.height(80.dp))
     }
 }
 
 @Composable
-private fun NeedSliderCard(label: String, help: String, value: Float, onChange: (Float) -> Unit) {
+private fun NeedRatingCard(label: String, help: String, value: Int?, onChange: (Int) -> Unit) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -393,27 +448,21 @@ private fun NeedSliderCard(label: String, help: String, value: Float, onChange: 
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        value.toInt().toString(),
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
+                Text(
+                    value?.toString() ?: "—",
+                    fontWeight = FontWeight.Bold,
+                    color = if (value == null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary
+                )
             }
-            Slider(value = value, onValueChange = onChange, valueRange = 1f..7f, steps = 5)
+            Spacer(Modifier.height(8.dp))
+            RatingRow(value = value, range = 1..7, onSelect = onChange)
         }
     }
 }
 
 // =====================================================================
-//  Step 2 — Top 3 Priorities (rank pyramid)
+//  Step 2 — Top 3 Priorities
 // =====================================================================
 
 @Composable
@@ -434,8 +483,6 @@ private fun TopPrioritiesStep(
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-
-        // --- Pyramid display ---
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceEvenly,
@@ -449,34 +496,25 @@ private fun TopPrioritiesStep(
             PyramidSlot(rank = 2, needKey = top3.getOrNull(1), onRemove = { top3.removeAt(1) })
             PyramidSlot(rank = 3, needKey = top3.getOrNull(2), onRemove = { top3.removeAt(2) })
         }
-
         Spacer(Modifier.height(8.dp))
-        Text(
-            s.prioritiesTapHint,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium
-        )
-
-        // --- Available needs ---
+        Text(s.prioritiesTapHint, fontSize = 13.sp, fontWeight = FontWeight.Medium)
         NEEDS.forEach { need ->
             val isPicked = top3.contains(need.key)
             val rank = top3.indexOf(need.key).takeIf { it >= 0 }?.plus(1)
             NeedPickRow(
                 label = s.needLabels[need.key] ?: need.label,
-                rating = needsAnswers[need.key]?.toInt() ?: 4,
+                rating = requireNotNull(needsAnswers[need.key]) {
+                    "Top-priority selection requires all 11 need ratings."
+                }.toInt(),
                 picked = isPicked,
                 rank = rank,
                 enabled = !isPicked && top3.size < 3,
                 onClick = {
-                    if (!isPicked && top3.size < 3) {
-                        top3.add(need.key)
-                    } else if (isPicked) {
-                        top3.remove(need.key)
-                    }
+                    if (!isPicked && top3.size < 3) top3.add(need.key)
+                    else if (isPicked) top3.remove(need.key)
                 }
             )
         }
-
         Spacer(Modifier.height(80.dp))
     }
 }
@@ -578,14 +616,81 @@ private fun NeedPickRow(
 }
 
 // =====================================================================
-//  Step 3 — Beliefs: how well each mode meets your Top-3 needs (1–7)
+//  Step 3 — Explicit structural availability
+// =====================================================================
+
+@Composable
+private fun AvailabilityStep(availability: MutableMap<String, Boolean>) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            phase1AvailabilityIntro(),
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            phase1AvailabilityHint(),
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        MODES.forEach { mode ->
+            AvailabilityCard(
+                mode = mode,
+                value = availability[mode.key],
+                onValue = { availability[mode.key] = it },
+            )
+        }
+        if (availability.size == MODES.size && availability.values.none { it }) {
+            Text(s.availabilityAtLeastOne, color = MaterialTheme.colorScheme.error, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(80.dp))
+    }
+}
+
+@Composable
+private fun AvailabilityCard(mode: ModeSpec, value: Boolean?, onValue: (Boolean) -> Unit) {
+    val s = LocalStrings.current
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.fillMaxWidth().padding(12.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(mode.emoji, fontSize = 22.sp)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    s.onbModeLabels[mode.key] ?: mode.label,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = value == true,
+                    onClick = { onValue(true) },
+                    label = { Text(s.available) },
+                )
+                FilterChip(
+                    selected = value == false,
+                    onClick = { onValue(false) },
+                    label = { Text(s.unavailable) },
+                )
+            }
+        }
+    }
+}
+
+// =====================================================================
+//  Step 4 — Beliefs: all 4 modes × all 11 needs (44 explicit ratings)
 // =====================================================================
 
 @Composable
 private fun BeliefsStep(
-    top3: List<String>,
     beliefs: MutableMap<String, MutableMap<String, Float>>,
-    beliefsNA: MutableMap<String, Boolean>,
+    availability: Map<String, Boolean>,
 ) {
     val s = LocalStrings.current
     Column(
@@ -596,7 +701,7 @@ private fun BeliefsStep(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
-            s.beliefsIntro,
+            phase1BeliefsIntro(s),
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -605,24 +710,15 @@ private fun BeliefsStep(
             fontSize = 12.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
-        if (top3.isEmpty()) {
-            Text(
-                s.beliefsPickFirst,
-                fontSize = 13.sp,
-                color = MaterialTheme.colorScheme.error
-            )
-        }
         Spacer(Modifier.height(4.dp))
         MODES.forEach { mode ->
             BeliefModeCard(
                 mode = mode,
-                top3 = top3,
-                na = beliefsNA[mode.key] ?: false,
+                available = availability[mode.key],
                 ratingOf = { needKey -> beliefs[mode.key]?.get(needKey)?.toInt() },
                 onRate = { needKey, value ->
                     beliefs.getOrPut(mode.key) { mutableStateMapOf() }[needKey] = value.toFloat()
                 },
-                onNA = { isNA -> beliefsNA[mode.key] = isNA },
             )
         }
         Spacer(Modifier.height(80.dp))
@@ -632,11 +728,9 @@ private fun BeliefsStep(
 @Composable
 private fun BeliefModeCard(
     mode: ModeSpec,
-    top3: List<String>,
-    na: Boolean,
+    available: Boolean?,
     ratingOf: (String) -> Int?,
     onRate: (String, Int) -> Unit,
-    onNA: (Boolean) -> Unit,
 ) {
     val s = LocalStrings.current
     Card(modifier = Modifier.fillMaxWidth()) {
@@ -650,39 +744,50 @@ private fun BeliefModeCard(
                     fontWeight = FontWeight.SemiBold,
                     fontSize = 16.sp
                 )
-                FilterChip(
-                    selected = na,
-                    onClick = { onNA(!na) },
-                    label = { Text(s.neverUse, fontSize = 11.sp) }
+                available?.let {
+                    Text(
+                        if (it) s.available else s.unavailable,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = if (it) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.error,
+                    )
+                }
+            }
+            if (available == false) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    unavailableMeasurementNote(),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            if (!na) {
-                top3.forEachIndexed { idx, needKey ->
-                    Spacer(Modifier.height(14.dp))
-                    Text(s.needLabels[needKey] ?: needKey, fontWeight = FontWeight.Medium, fontSize = 14.sp)
-                    if (idx == 0) {
-                        Text(
-                            s.mostImportantNeed,
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Spacer(Modifier.height(6.dp))
-                    LikertRow(value = ratingOf(needKey), onSelect = { onRate(needKey, it) })
-                }
+            NEEDS.forEach { need ->
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    s.needLabels[need.key] ?: need.label,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp
+                )
+                Spacer(Modifier.height(6.dp))
+                RatingRow(
+                    value = ratingOf(need.key),
+                    range = 1..7,
+                    onSelect = { onRate(need.key, it) }
+                )
             }
         }
     }
 }
 
-/** 1–7 selectable buttons, matching the survey mockup. */
+/** Explicit selectable response buttons; null means the user has not answered. */
 @Composable
-private fun LikertRow(value: Int?, onSelect: (Int) -> Unit) {
+private fun RatingRow(value: Int?, range: IntRange, onSelect: (Int) -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        (1..7).forEach { n ->
+        range.forEach { n ->
             val selected = value == n
             Box(
                 modifier = Modifier
@@ -715,77 +820,13 @@ private fun LikertRow(value: Int?, onSelect: (Int) -> Unit) {
 }
 
 // =====================================================================
-//  Step 4 — Mode Frequencies (4 modes, 1–5)
-// =====================================================================
-
-@Composable
-private fun FrequenciesStep(frequencies: MutableMap<String, Float>) {
-    val s = LocalStrings.current
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        Text(
-            s.frequenciesIntro,
-            fontSize = 14.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            s.frequenciesScaleHint,
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(4.dp))
-        MODES.forEach { mode ->
-            FrequencyRow(
-                emoji = mode.emoji,
-                label = s.onbModeLabels[mode.key] ?: mode.label,
-                value = frequencies[mode.key] ?: 1f,
-                onChange = { frequencies[mode.key] = it }
-            )
-        }
-        Spacer(Modifier.height(80.dp))
-    }
-}
-
-@Composable
-private fun FrequencyRow(emoji: String, label: String, value: Float, onChange: (Float) -> Unit) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(12.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(emoji, fontSize = 22.sp)
-                Spacer(Modifier.width(10.dp))
-                Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
-                Box(
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        value.toInt().toString(),
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                    )
-                }
-            }
-            Slider(value = value, onValueChange = onChange, valueRange = 1f..5f, steps = 3)
-        }
-    }
-}
-
-// =====================================================================
-//  Step 4 — Emoval (emoji slider per mode, with "No answer")
+//  Step 5 — Action valence (four explicit bipolar ratings)
 // =====================================================================
 
 @Composable
 private fun EmovalStep(
     valences: MutableMap<String, Float>,
-    valencesNA: MutableMap<String, Boolean>,
+    availability: Map<String, Boolean>,
 ) {
     val s = LocalStrings.current
     Column(
@@ -796,7 +837,7 @@ private fun EmovalStep(
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Text(
-            s.emovalIntro,
+            phase1ValenceIntro(s),
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -810,10 +851,9 @@ private fun EmovalStep(
             ValenceCard(
                 emoji = mode.emoji,
                 label = s.onbModeLabels[mode.key] ?: mode.label,
-                value = valences[mode.key] ?: 4f,
-                na = valencesNA[mode.key] ?: false,
-                onValue = { valences[mode.key] = it },
-                onNA = { valencesNA[mode.key] = it }
+                available = availability[mode.key],
+                value = valences[mode.key]?.toInt(),
+                onValue = { valences[mode.key] = it.toFloat() },
             )
         }
         Spacer(Modifier.height(80.dp))
@@ -824,61 +864,121 @@ private fun EmovalStep(
 private fun ValenceCard(
     emoji: String,
     label: String,
-    value: Float,
-    na: Boolean,
-    onValue: (Float) -> Unit,
-    onNA: (Boolean) -> Unit,
+    available: Boolean?,
+    value: Int?,
+    onValue: (Int) -> Unit,
 ) {
     val s = LocalStrings.current
     val faceEmoji = when {
-        na          -> "😐"   // neutral
-        value <= 2f -> "😡"   // angry
-        value <= 3f -> "🙁"   // frown
-        value <= 4f -> "😐"   // neutral
-        value <= 5f -> "🙂"   // slight smile
-        value <= 6f -> "😊"   // smile
-        else        -> "😍"   // heart eyes
+        value == null -> "❔"
+        value <= 2 -> "😡"
+        value <= 3 -> "🙁"
+        value <= 4 -> "😐"
+        value <= 5 -> "🙂"
+        value <= 6 -> "😊"
+        else -> "😍"
     }
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(emoji, fontSize = 22.sp)
                 Spacer(Modifier.width(10.dp))
-                Text(label, modifier = Modifier.weight(1f), fontWeight = FontWeight.Medium)
+                Column(Modifier.weight(1f)) {
+                    Text(label, fontWeight = FontWeight.Medium)
+                    if (available == false) {
+                        Text(
+                            s.unavailable,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
                 Text(faceEmoji, fontSize = 26.sp)
             }
-            if (!na) {
-                Slider(value = value, onValueChange = onValue, valueRange = 1f..7f, steps = 5)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(s.negative, fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(s.positive, fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            } else {
-                Spacer(Modifier.height(20.dp))
+            if (available == false) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    unavailableMeasurementNote(),
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
+            Spacer(Modifier.height(8.dp))
+            RatingRow(value = value, range = 1..7, onSelect = onValue)
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Checkbox(checked = na, onCheckedChange = { onNA(it) })
-                Text(s.noExperience, fontSize = 12.sp)
+                Text(s.negative, fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(s.positive, fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
 }
 
 // =====================================================================
-//  Step 5 — Generating
+//  Step 6 — Explicit environmental tolerance self-report
+// =====================================================================
+
+@Composable
+private fun EnvironmentalToleranceStep(answers: MutableMap<String, Int>) {
+    val s = LocalStrings.current
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            s.environmentalToleranceIntro,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(
+            "${s.environmentalToleranceLow} · ${s.environmentalToleranceHigh}",
+            fontSize = 12.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        ENVIRONMENTAL_TOLERANCE_KEYS.forEach { key ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            s.environmentalToleranceQuestions.getValue(key),
+                            modifier = Modifier.weight(1f),
+                            fontWeight = FontWeight.Medium,
+                            fontSize = 14.sp,
+                        )
+                        Text(
+                            answers[key]?.toString() ?: "—",
+                            fontWeight = FontWeight.Bold,
+                            color = if (answers[key] == null) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    RatingRow(
+                        value = answers[key],
+                        range = 1..7,
+                        onSelect = { answers[key] = it },
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(80.dp))
+    }
+}
+
+// =====================================================================
+//  Step 7 — Generating
 // =====================================================================
 
 @OptIn(ExperimentalAnimationApi::class)
 @Composable
-private fun GeneratingStep(generating: Boolean, error: String?, onRetry: () -> Unit, onOffline: () -> Unit) {
+private fun GeneratingStep(generating: Boolean, error: String?, onRetry: () -> Unit) {
     val s = LocalStrings.current
     Column(
         modifier = Modifier
@@ -951,8 +1051,6 @@ private fun GeneratingStep(generating: Boolean, error: String?, onRetry: () -> U
             )
             Spacer(Modifier.height(24.dp))
             Button(onClick = onRetry) { Text(s.tryAgain) }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = onOffline) { Text(s.useOffline) }
         }
     }
 }
@@ -1067,7 +1165,7 @@ private fun ThinkingDots() {
 }
 
 // =====================================================================
-//  Step 6 — Result
+//  Step 8 — Result
 // =====================================================================
 
 @Composable
@@ -1120,8 +1218,6 @@ private fun ResultStep(aiRead: String?, aiReady: Boolean) {
         )
         Spacer(Modifier.height(20.dp))
 
-        // ✨ gpt-5.4 personality read — shows the model's own narrative instantly,
-        // then upgrades to the LLM read when it arrives (or stays if the LLM fails).
         Card(
             modifier = Modifier.fillMaxWidth().alpha(fade),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
@@ -1162,8 +1258,6 @@ private fun ResultStep(aiRead: String?, aiReady: Boolean) {
         }
 
         Spacer(Modifier.height(12.dp))
-        // No "preferred mode" here on purpose — the personalization shows up in the
-        // route suggestions, not as a single label.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -1210,22 +1304,21 @@ private fun BottomBar(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (step in 1..5 && !generating) {
+            if (step in 1..6 && !generating) {
                 OutlinedButton(onClick = onBack) { Text(s.back) }
             }
             Spacer(Modifier.weight(1f))
             when (step) {
-                0 -> Button(onClick = onNext) { Text(s.letsBegin) }
-                in 1..5 -> Button(onClick = onNext, enabled = canAdvance) {
-                    Text(if (step == 5) s.generatePassport else s.nextBtn)
+                0 -> Button(onClick = onNext, enabled = canAdvance) { Text(s.letsBegin) }
+                in 1..6 -> Button(onClick = onNext, enabled = canAdvance) {
+                    Text(if (step == 6) s.generatePassport else s.nextBtn)
                 }
-                6 -> { /* no buttons during generating; retry inside step */ }
-                7 -> if (aiReady) {
+                7 -> { /* generating / retry is rendered inside the step */ }
+                8 -> if (aiReady) {
                     Button(onClick = onFinish, modifier = Modifier.fillMaxWidth()) {
                         Text(s.continueToApp)
                     }
                 } else {
-                    // AI personality read still in flight — block Continue and show why.
                     Button(onClick = {}, enabled = false, modifier = Modifier.fillMaxWidth()) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
@@ -1242,140 +1335,146 @@ private fun BottomBar(
 }
 
 // =====================================================================
-//  Survey JSON builder — matches the LimeSurvey format the parser expects
+//  Strict HOTCO-CT v4.3 request builder — input schema 2.1
 // =====================================================================
 
-private fun buildSurveyJson(
+internal fun buildSurveyJson(
+    participantId: String,
     needs: Map<String, Float>,
     top3: List<String>,
-    frequencies: Map<String, Float>,
     valences: Map<String, Float>,
-    valencesNA: Map<String, Boolean>,
     beliefs: Map<String, Map<String, Float>>,
-    beliefsNA: Map<String, Boolean>,
+    availability: Map<String, Boolean>,
+    environmentalTolerances: Map<String, Int?> = emptyMap(),
 ): String {
-    // APP block — ratings, ranking, beliefs (per-mode ratings for the Top-3 needs).
-    val app = buildJsonObject {
-        put("answers", buildJsonObject {
-            put("ratings", buildJsonObject {
-                needs.forEach { (k, v) -> put(k, v.toInt()) }
-                put("attn_check", 7)   // hidden attention check; required by parser
-            })
-            put("ranking", buildJsonArray { top3.forEach { add(it) } })
-            // beliefs: {mode: {top3_need: 1..7}} for every mode the user DOES use.
-            // The parser reads these Top-3 ratings and imputes the remaining needs.
-            put("beliefs", buildJsonObject {
-                MODES.forEach { mode ->
-                    if (beliefsNA[mode.key] != true) {
-                        put(mode.key, buildJsonObject {
-                            top3.forEach { needKey ->
-                                put(needKey, (beliefs[mode.key]?.get(needKey) ?: 4f).toInt())
-                            }
-                        })
-                    }
-                }
-            })
-            // Modes marked "I never use / no opinion" → omitted above + imputed.
-            put("skippedModes", buildJsonArray {
-                MODES.forEach { if (beliefsNA[it.key] == true) add(it.key) }
-            })
-        })
+    val agentId = participantId.trim()
+    require(agentId.isNotEmpty()) { "A user-provided participant identifier is required." }
+    val needKeys = NEEDS.map { it.key }.toSet()
+    val modeKeys = MODES.map { it.key }.toSet()
+    fun Float.isIntegerRating(range: ClosedFloatingPointRange<Float>): Boolean =
+        isFinite() && this in range && this % 1f == 0f
+
+    fun ratingIssues(
+        answers: Map<String, Float>,
+        requiredKeys: Set<String>,
+        range: ClosedFloatingPointRange<Float>,
+    ): Pair<List<String>, List<String>> {
+        val missing = requiredKeys.filter { answers[it] == null }.sorted()
+        val invalid = requiredKeys.filter { key ->
+            answers[key]?.let { !it.isIntegerRating(range) } == true
+        }.sorted()
+        return missing to invalid
     }
 
-    // MOBIL block — frequencies for both scenarios (s1 = work, s2 = leisure).
-    // We collect once and duplicate to both scenarios.
-    val mobil = buildJsonObject {
-        frequencies.forEach { (m, v) ->
-            put("s1_$m", v.toInt())
-            put("s2_$m", v.toInt())
+    val (missingNeeds, invalidNeeds) = ratingIssues(needs, needKeys, 1f..7f)
+    require(missingNeeds.isEmpty() && invalidNeeds.isEmpty()) {
+        buildString {
+            append("All 11 need ratings must be explicitly selected from 1 to 7.")
+            if (missingNeeds.isNotEmpty()) append(" Missing: ${missingNeeds.joinToString()}.")
+            if (invalidNeeds.isNotEmpty()) append(" Invalid: ${invalidNeeds.joinToString()}.")
         }
     }
 
-    // emoval block — slider 1..7 → emoval -3..+3; NA stays as "NA"
-    val emoval = buildJsonObject {
-        put("answers", buildJsonObject {
-            MODES.forEach { mode ->
-                val isNA = valencesNA[mode.key] ?: false
-                if (isNA) {
-                    put(mode.key, "NA")
-                } else {
-                    val v = (valences[mode.key] ?: 4f).toInt() - 4  // -3..+3
-                    put(mode.key, v)
+    require(
+        top3.size == 3 && top3.distinct().size == 3 && top3.all { it in needKeys }
+    ) { "Exactly three distinct, recognized ranked priorities are required." }
+
+    require(modeKeys.all { it in availability } && modeKeys.any { availability[it] == true }) {
+        "All four explicit availability responses and at least one available mode are required."
+    }
+
+    val beliefIssues = modeKeys.flatMap { mode ->
+        val modeBeliefs = beliefs[mode].orEmpty()
+        val (missing, invalid) = ratingIssues(modeBeliefs, needKeys, 1f..7f)
+        buildList {
+            if (missing.isNotEmpty()) add("$mode missing ${missing.joinToString()}")
+            if (invalid.isNotEmpty()) add("$mode invalid ${invalid.joinToString()}")
+        }
+    }
+    require(beliefIssues.isEmpty()) {
+        "All 44 need-mode ratings must be explicitly selected from 1 to 7. " +
+            beliefIssues.joinToString("; ")
+    }
+
+    val (missingValences, invalidValences) = ratingIssues(valences, modeKeys, 1f..7f)
+    require(missingValences.isEmpty() && invalidValences.isEmpty()) {
+        "All four valence ratings must be explicitly selected from 1 to 7."
+    }
+
+    return buildJsonObject {
+        put("schema_version", "hotco_ct_input_2.1")
+        put("agent_id", agentId)
+        put("responses", buildJsonObject {
+            put("needs", buildJsonObject {
+                NEEDS.forEach { need -> put(need.key, requireNotNull(needs[need.key]).toInt()) }
+            })
+            put("availability", buildJsonObject {
+                MODES.forEach { mode -> put(mode.key, requireNotNull(availability[mode.key])) }
+            })
+            put("beliefs", buildJsonObject {
+                MODES.forEach { mode ->
+                    put(mode.key, buildJsonObject {
+                        NEEDS.forEach { need ->
+                            put(need.key, requireNotNull(beliefs[mode.key]?.get(need.key)).toInt())
+                        }
+                    })
                 }
-            }
+            })
+            put("valences", buildJsonObject {
+                MODES.forEach { mode ->
+                    put(mode.key, requireNotNull(valences[mode.key]).toInt() - 4)
+                }
+            })
+            put("top_needs_ranking", buildJsonArray { top3.forEach { add(it) } })
+            put("environmental_tolerances", buildJsonObject {
+                ENVIRONMENTAL_TOLERANCE_KEYS.forEach { key ->
+                    val tolerance = likertToTolerance(environmentalTolerances[key])
+                    if (tolerance == null) put(key, JsonNull) else put(key, tolerance)
+                }
+            })
         })
-    }
+    }.toString()
+}
 
-    val survey = buildJsonObject {
-        put("id", 1)
-        put("PROFILE", "{\"answers\":{}}")
-        put("MOBIL", mobil.toString())
-        put("APP", app.toString())
-        put("emoval", emoval.toString())
-        // 'What matters in life' (values) question was removed. The parser still
-        // requires the section to exist, so send it empty → all value orientations
-        // default to neutral (values are display-only in the baseline model).
-        put("values", "{\"answers\":{}}")
-        put("POI", "[]")
-    }
-    return survey.toString()
+internal fun likertToTolerance(value: Int?): Double? {
+    if (value == null) return null
+    require(value in 1..7) { "Environmental tolerance response must be within 1..7." }
+    return (value - 1) / 6.0
 }
 
 // =====================================================================
-//  Passport summary parsing (for the result step)
+//  Strict response validation before anything is stored on the device
 // =====================================================================
 
-internal data class PassportSummary(
-    val mode: String,
-    val confidence: Double,
-)
+internal fun isValidPassportV2(passportJson: String): Boolean {
+    return try {
+        val cp = Json.parseToJsonElement(passportJson).jsonObject["cognitive_passport"]?.jsonObject
+            ?: return false
+        if (cp["schema_version"]?.jsonPrimitive?.contentOrNull != "2.0") return false
 
-internal fun summarizePassport(passportJson: String): PassportSummary? = try {
-    val cp = Json.parseToJsonElement(passportJson).jsonObject["cognitive_passport"]?.jsonObject
-    val deliberation = cp?.get("deliberation")?.jsonObject
-    PassportSummary(
-        mode       = deliberation?.get("final_choice")?.jsonPrimitive?.content ?: "?",
-        confidence = deliberation?.get("confidence")?.jsonPrimitive?.doubleOrNull ?: 0.0,
-    )
-} catch (_: Exception) { null }
+        val provenance = cp["input_provenance"]?.jsonObject ?: return false
+        if (provenance["source_schema"]?.jsonPrimitive?.contentOrNull != "hotco_ct_input_2.1") return false
+        if (provenance["policy"]?.jsonPrimitive?.contentOrNull != "current_user_responses_only") return false
+        if (provenance["imputation_used"]?.jsonPrimitive?.booleanOrNull != false) return false
+        if (provenance["population_or_synthetic_values_used"]?.jsonPrimitive?.booleanOrNull != false) return false
 
-// =====================================================================
-//  Derive a ClassificationResult so MainActivity's downstream screens
-//  (which still expect the old 5-category profile) can keep working.
-// =====================================================================
+        val availabilityResolution = provenance["availability_resolution"]?.jsonObject ?: return false
+        if (availabilityResolution["policy"]?.jsonPrimitive?.contentOrNull !=
+            "explicit_user_declared_access_only") return false
+        if (availabilityResolution["external_provider_data_used"]?.jsonPrimitive?.booleanOrNull != false) return false
+        if (availabilityResolution["frequency_or_preference_inference_used"]?.jsonPrimitive?.booleanOrNull != false) return false
 
-private fun derivedClassification(
-    needs: Map<String, Float>,
-    summary: PassportSummary,
-): ClassificationResult {
-    val topNeed = needs.maxByOrNull { it.value }?.key
-    val profileType = when (topNeed) {
-        "env", "health_activity" -> ProfileType.ECO_WARRIOR
-        "comfort_physical", "safety_crime", "crowding" -> ProfileType.COMFORT_SEEKER
-        "time", "flex"                                 -> ProfileType.TIME_OPTIMIZER
-        "cost"                                         -> ProfileType.BUDGET_CONSCIOUS
-        else                                           -> ProfileType.FLEXIBLE_PRAGMATIST
+        val counts = provenance["observed_counts"]?.jsonObject ?: return false
+        if (counts["needs"]?.jsonPrimitive?.intOrNull != 11) return false
+        if (counts["beliefs"]?.jsonPrimitive?.intOrNull != 44) return false
+        if (counts["valences"]?.jsonPrimitive?.intOrNull != 4) return false
+        if (counts["availability"]?.jsonPrimitive?.intOrNull != 4) return false
+
+        val deliberation = cp["deliberation"]?.jsonObject ?: return false
+        if (deliberation["terminal_tendency"]?.jsonPrimitive?.contentOrNull.isNullOrBlank()) return false
+        if (deliberation["terminal_margin"]?.jsonPrimitive?.doubleOrNull == null) return false
+        deliberation["comparative_readout"]?.jsonObject?.size == 4
+    } catch (_: Exception) {
+        false
     }
-    val classifier = MobilityClassifier()
-    val profile = classifier.getProfile(profileType)
-        ?: classifier.getProfile(ProfileType.FLEXIBLE_PRAGMATIST)!!
-    return ClassificationResult(
-        profileType  = profileType,
-        profile      = profile,
-        scores       = ProfileType.values().associate { it to 0f },
-        confidence   = (summary.confidence * 100).toFloat(),
-        explanations = listOf("Derived from cognitive passport (mode: ${summary.mode}).")
-    )
-}
-
-private fun fallbackClassification(): ClassificationResult {
-    val classifier = MobilityClassifier()
-    val profile = classifier.getProfile(ProfileType.FLEXIBLE_PRAGMATIST)!!
-    return ClassificationResult(
-        profileType  = ProfileType.FLEXIBLE_PRAGMATIST,
-        profile      = profile,
-        scores       = ProfileType.values().associate { it to 0f },
-        confidence   = 50f,
-        explanations = listOf("Fallback profile.")
-    )
 }

@@ -8,17 +8,15 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.util.concurrent.TimeUnit
 
-/**
- * Talks to the DYCONET passport service deployed on the imiq-app server.
- * Replaces the old Spark-over-Tailscale interface — no Tailscale needed anymore.
- */
+/** Talks to the DYCONET HOTCO-CT v4.3 passport service selected at build time. */
 object PassportApiService {
-    // DYCONET deployed on the imiq-app server (verified live 2026-07-16):
-    // POST /api/dyconet -> baseline_1.0 passport in ~0.3 s. HTTPS, so it works
-    // from any phone on any network — no adb reverse / laptop rig needed.
-    // Local fallback for offline demos: http://127.0.0.1:8077 with
-    // `adb reverse tcp:8077 tcp:8077` (start_dyconet.bat).
-    private const val BASE_URL = "https://imiq-app.et.uni-magdeburg.de"
+    // POST /api/dyconet -> HOTCO-CT v4.3 Cognitive Passport v2.
+    // The server validates the complete hotco_ct_input_2.1 questionnaire,
+    // including explicit user-declared availability, and never fills missing input.
+    // localEmulator: http://10.0.2.2:8077
+    // localUsb:      http://127.0.0.1:8077 after `adb reverse tcp:8077 tcp:8077`
+    // production:    https://imiq-app.et.uni-magdeburg.de
+    private val baseUrl: String = BuildConfig.DYCONET_BASE_URL.trimEnd('/')
 
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
@@ -28,12 +26,12 @@ object PassportApiService {
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
     /**
-     * POST one LimeSurvey-shape survey response.
+     * POST one strict hotco_ct_input_2.1 questionnaire response.
      * Returns the cognitive passport JSON as a String.
      */
     suspend fun generatePassport(surveyJson: String): String = withContext(Dispatchers.IO) {
         val request = Request.Builder()
-            .url("$BASE_URL/api/dyconet")
+            .url("$baseUrl/api/dyconet")
             .post(surveyJson.toRequestBody(JSON))
             .build()
 
